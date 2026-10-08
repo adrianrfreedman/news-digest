@@ -1,0 +1,5 @@
+logs/
+sent/
+state.json
+stories.jsonl
+__pycache__/
