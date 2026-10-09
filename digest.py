@@ -26,43 +26,164 @@ from functools import cache
 from html import escape as _esc, unescape
 from http.cookiejar import CookieJar
 from pathlib import Path
+from typing import Literal
 from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
+
+from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettingsSource
 
 # ---------- config ----------
 APP = Path(__file__).resolve().parent
 LOGS, SENT = APP / "logs", APP / "sent"
 STATE, LEDGER = APP / "state.json", APP / "stories.jsonl"
 CONFIG = Path(os.environ.get("NEWS_DIGEST_CONFIG", APP / "config.toml"))  # env override is for tests
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]  # index = date.weekday()
+load_dotenv(APP / ".env", override=False)  # API keys; real env wins
+
+
+class Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Mail(Strict):
+    admin: str
+    recipients: list[str] = Field(min_length=1)
+    shadow: bool  # admin only, "[SHADOW] " prefix
+
+    @model_validator(mode="after")
+    def admin_receives(self):
+        if not self.shadow and self.admin not in self.recipients:
+            raise ValueError("admin must be in recipients when shadow = false")
+        return self
+
+
+class Schedule(Strict):
+    timezone: str
+    tz_label: str
+    hour: int = Field(ge=0, le=23)
+    send_days: list[Literal["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]] = Field(min_length=1)
+    catchup_days: int = Field(ge=0)  # max digests per run; older due slots are skipped
+
+    @field_validator("timezone")
+    @classmethod
+    def known_tz(cls, v):
+        try:
+            ZoneInfo(v)
+        except (ValueError, KeyError):
+            raise ValueError(f"unknown timezone {v!r}") from None
+        return v
+
+
+class Region(Strict):
+    name: str
+    color: str = Field(pattern=r"^#([0-9a-fA-F]{3}){1,2}$")
+    rule: str
+
+
+class Tiers(Strict):
+    lead: int = Field(ge=0)
+    main: int = Field(ge=0)
+    brief: int = Field(ge=0)
+
+
+class News(Strict):
+    sources: str
+    reader: str
+    proximity: str
+    significance: str
+    key_examples: str
+    score_examples: list[str]
+    categories: list[str]
+    threshold: int
+    threshold_long: int
+    caps: Tiers  # stories per region per tier
+    link_caps: Tiers  # links per story
+    regions: list[Region] = Field(min_length=1)
+
+    @field_validator("regions")
+    @classmethod
+    def unique_names(cls, v):
+        if len({r.name for r in v}) < len(v):
+            raise ValueError("region names must be unique")
+        return v
+
+
+class Stage(Strict):
+    backend: Literal["claude-cli", "openai"] = "claude-cli"
+    model: str
+    effort: str = ""
+    budget_usd: float = Field(gt=0)  # claude-cli only
+    timeout_s: int = Field(gt=0)
+    base_url: str | None = None  # openai only, as are the two below
+    api_key_env: str = "OPENAI_API_KEY"
+    max_output_tokens: int = Field(16000, gt=0)
+
+
+STAGE_DEFAULTS = {"group": {"model": "sonnet", "effort": "low", "budget_usd": 0.90, "timeout_s": 600},
+                  "write": {"model": "haiku", "effort": "", "budget_usd": 0.15, "timeout_s": 300},
+                  "send": {"model": "haiku", "effort": "", "budget_usd": 0.30, "timeout_s": 300}}
+
+
+class Llm(Strict):
+    group: Stage
+    write: Stage
+    send: Stage
+
+    @model_validator(mode="before")
+    @classmethod
+    def stage_defaults(cls, v):
+        """Partial [llm.<stage>] tables keep that stage's own defaults."""
+        return {**v, **{k: {**d, **v.get(k, {})} for k, d in STAGE_DEFAULTS.items()}} if isinstance(v, dict) else v
+
+    @field_validator("send")
+    @classmethod
+    def send_via_cli(cls, v):
+        if v.backend != "claude-cli":
+            raise ValueError('must use backend = "claude-cli" (only it can reach the Gmail connector)')
+        return v
+
+
+class Paths(Strict):
+    claude: str | None = None  # default: claude on PATH, else ~/.local/bin/claude
+
+
+class Settings(BaseSettings):
+    """CONFIG toml, overridden by NEWS_DIGEST_<SECTION>__<KEY> env vars."""
+    model_config = SettingsConfigDict(env_prefix="NEWS_DIGEST_", env_nested_delimiter="__", extra="forbid")
+    mail: Mail
+    schedule: Schedule
+    paths: Paths = Paths()
+    llm: Llm = Field(default_factory=Llm)
+    news: News
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+        return init_settings, env_settings, TomlConfigSettingsSource(settings_cls, CONFIG)
+
+
 if not CONFIG.exists():
     sys.exit(f"news-digest: {CONFIG} not found. Copy config.example.toml to config.toml and edit it.")
-CFG = tomllib.loads(CONFIG.read_text())
-ENV_FILE = APP / ".env"  # local, git-ignored KEY=value lines for API keys; real env wins
-if ENV_FILE.exists():
-    for line in ENV_FILE.read_text().splitlines():
-        if "=" in line and not line.lstrip().startswith("#"):
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip().strip("'\""))
-MAIL, SCHED, NEWS = CFG["mail"], CFG["schedule"], CFG["news"]
-SHADOW, ADMIN, RECIPIENTS = MAIL["shadow"], MAIL["admin"], MAIL["recipients"]  # shadow: admin only, "[SHADOW] " prefix
-TZ, UTC, HOUR = ZoneInfo(SCHED["timezone"]), timezone.utc, SCHED["hour"]
-WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]  # index = date.weekday()
-SEND_DAYS = {WEEKDAYS.index(d) for d in SCHED["send_days"]}
-CATCHUP = SCHED["catchup_days"]  # max digests per run; older due slots are skipped
-# per-stage model settings; config [llm.<stage>] overrides these defaults
-LLM_DEFAULTS = {"group": {"backend": "claude-cli", "model": "sonnet", "effort": "low", "budget_usd": 0.90, "timeout_s": 600},
-                "write": {"backend": "claude-cli", "model": "haiku", "effort": "", "budget_usd": 0.15, "timeout_s": 300},
-                "send": {"backend": "claude-cli", "model": "haiku", "effort": "", "budget_usd": 0.30, "timeout_s": 300}}
-OPENAI_DEFAULTS = {"base_url": None, "api_key_env": "OPENAI_API_KEY", "max_output_tokens": 16000}
-LLM = {k: {**v, **CFG.get("llm", {}).get(k, {})} for k, v in LLM_DEFAULTS.items()}
-if LLM["send"]["backend"] != "claude-cli":
-    sys.exit("news-digest: [llm.send] must use backend = \"claude-cli\" (only it can reach the Gmail connector)")
-CLAUDE = CFG.get("paths", {}).get("claude") or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
-SOURCES = APP / NEWS["sources"]
-REGIONS = [r["name"] for r in NEWS["regions"]]
-RCOL = {r["name"]: r["color"] for r in NEWS["regions"]}
-CATEGORIES = set(NEWS["categories"])
-CAPS, LINK_CAP = NEWS["caps"], NEWS["link_caps"]
+try:
+    S = Settings()
+except tomllib.TOMLDecodeError as e:
+    sys.exit(f"news-digest: {CONFIG}: {e}")
+except ValidationError as e:
+    sys.exit(f"news-digest: invalid {CONFIG}:\n" + "\n".join(
+        f"  {'.'.join(map(str, err['loc'])) or '(top)'}: {err['msg']}" for err in e.errors()))
+SHADOW, ADMIN, RECIPIENTS = S.mail.shadow, S.mail.admin, S.mail.recipients
+TZ, UTC, HOUR = ZoneInfo(S.schedule.timezone), timezone.utc, S.schedule.hour
+SEND_DAYS = {WEEKDAYS.index(d) for d in S.schedule.send_days}
+CATCHUP = S.schedule.catchup_days
+LLM_DEFAULTS, LLM = Llm().model_dump(), S.llm.model_dump()  # {stage: {key: value}}
+CLAUDE = S.paths.claude or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
+NEWS = S.news
+SOURCES = APP / NEWS.sources
+REGIONS = [r.name for r in NEWS.regions]
+RCOL = {r.name: r.color for r in NEWS.regions}
+CATEGORIES = set(NEWS.categories)
+CAPS, LINK_CAP = NEWS.caps.model_dump(), NEWS.link_caps.model_dump()
 LIMITS = {"lead": "80–120 words", "main": "≤45 words", "brief": "headline only, ≤18 words"}
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 MSG_ID = re.compile(r"`?([0-9a-f]{16})`?")
@@ -299,7 +420,7 @@ def no_tools(stage, scale=1):
 def openai_call(stage, prompt, tag, wd, scale=1):
     """One chat completion against any OpenAI-compatible API (OpenRouter, OpenAI, Gemini, Ollama, ...)."""
     from openai import OpenAI  # lazy: only needed for this backend
-    c = {**OPENAI_DEFAULTS, **LLM[stage]}
+    c = LLM[stage]
     key = os.environ.get(c["api_key_env"])
     if not key:
         raise RuntimeError(f"{tag}: ${c['api_key_env']} not set (put it in .env)")
@@ -375,12 +496,12 @@ def item_line(i, items, trim):
 def fill(name, **kw):
     """Prompt template with {{KEY}}s filled from config + kw."""
     feeds = json.loads(SOURCES.read_text())["feeds"]
-    kw = {"READER": NEWS["reader"], "PROXIMITY": NEWS["proximity"], "SIGNIFICANCE": NEWS["significance"],
-          "KEY_EXAMPLES": NEWS["key_examples"], "SCORE_EXAMPLES": " ".join(NEWS["score_examples"]),
-          "CATEGORIES": ", ".join(NEWS["categories"]), "REGION_ENUM": "|".join(REGIONS),
-          "REGION_RULES": "\n".join(f"- **{r['name']}** — {r['rule']}" for r in NEWS["regions"]),
+    kw = {"READER": NEWS.reader, "PROXIMITY": NEWS.proximity, "SIGNIFICANCE": NEWS.significance,
+          "KEY_EXAMPLES": NEWS.key_examples, "SCORE_EXAMPLES": " ".join(NEWS.score_examples),
+          "CATEGORIES": ", ".join(NEWS.categories), "REGION_ENUM": "|".join(REGIONS),
+          "REGION_RULES": "\n".join(f"- **{r.name}** — {r.rule}" for r in NEWS.regions),
           "FRAMING": ", ".join(dict.fromkeys(f["outlet"] for f in feeds if "F" in f.get("flags", "").split())),
-          "TIME": f"{HOUR:02d}:00 {SCHED['tz_label']}", **kw}
+          "TIME": f"{HOUR:02d}:00 {S.schedule.tz_label}", **kw}
     text = (APP / name).read_text()
     for k, v in kw.items():
         text = text.replace("{{" + k + "}}", str(v))
@@ -667,7 +788,7 @@ def render(sections, items, slot, start, skipped):
 <tr><td style="text-align:left;{SERIF}font-size:16px;line-height:1.55;color:{INK};">
 <p style="margin:0;{SANS}font-size:14px;font-weight:700;color:{MUTED};">Morning digest</p>
 <p style="margin:2px 0 8px;font-size:32px;line-height:1.15;font-weight:700;">{day}</p>
-<p style="margin:0;{SANS}font-size:14px;line-height:1.5;color:{MUTED};">News from {ampm} {st:%A} to {ampm} {local:%A}, {SCHED["tz_label"]}.<br>{len(allst)} stories, about {max(1, round(words / 238))} minutes: {contents}.{note}</p>
+<p style="margin:0;{SANS}font-size:14px;line-height:1.5;color:{MUTED};">News from {ampm} {st:%A} to {ampm} {local:%A}, {S.schedule.tz_label}.<br>{len(allst)} stories, about {max(1, round(words / 238))} minutes: {contents}.{note}</p>
 {chr(10).join(section(r, sections[r]) for r in REGIONS)}
 <p style="margin:36px 0 0;padding-top:12px;border-top:1px solid #e3e5e8;{SANS}font-size:12px;line-height:1.6;color:{MUTED};">
 Blue links are trusted outlets. <span style="color:{PLUM};">Plum</span> links and Counterpoint notes come from counterpoint outlets.
@@ -750,7 +871,7 @@ def run_slot(slot, skipped, no_send):
     t1 = time.time()
     stories = group(items, start, end, ledger, wd)
     rec["group_s"], rec["grouped"] = round(time.time() - t1, 1), len(stories)
-    sections = select(stories, items, NEWS["threshold_long"] if len(window_days(start, end)) > 1 else NEWS["threshold"])
+    sections = select(stories, items, NEWS.threshold_long if len(window_days(start, end)) > 1 else NEWS.threshold)
     check_keys([s for r in REGIONS for s in sections[r]], ledger)
 
     t1 = time.time()

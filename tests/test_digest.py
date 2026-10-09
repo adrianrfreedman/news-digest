@@ -6,6 +6,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 APP = Path(__file__).resolve().parent.parent
 os.environ["NEWS_DIGEST_CONFIG"] = str(APP / "config.example.toml")  # never the local config.toml
@@ -118,6 +119,58 @@ class TestLlmConfig:
         assert args[args.index("--tools") + 1] == "" and "--strict-mcp-config" in args
 
 
+class TestSettings:
+    def load(self, monkeypatch, tmp_path, *subs, path=APP / "config.example.toml"):
+        """Settings from `path` with (regex, replacement) substitutions applied."""
+        text = path.read_text()
+        for pat, rep in subs:
+            text, n = re.subn(pat, rep, text)
+            assert n, pat
+        cfg = tmp_path / "c.toml"
+        cfg.write_text(text)
+        monkeypatch.setattr(digest, "CONFIG", cfg)
+        return digest.Settings()
+
+    def test_example_validates(self, monkeypatch, tmp_path):
+        assert self.load(monkeypatch, tmp_path).schedule.hour == 7
+
+    @pytest.mark.parametrize("pat,rep,match", [
+        (r"hour = 7", "hour = 7\nhuor = 7", "huor"),
+        (r"hour = 7", "hour = 24", "schedule.hour"),
+        (r"Europe/London", "Mars/Olympus", "unknown timezone"),
+        (r'send_days = \[', 'send_days = ["Sabbath", ', "send_days"),
+        (r"shadow = true", "shadow = false", "admin must be in recipients"),
+        (r'"#1f4e8c"', '"blue"', "color"),
+        (r'name = "World"', 'name = "UK"', "unique"),
+    ])
+    def test_rejects_bad_config(self, monkeypatch, tmp_path, pat, rep, match):
+        subs = [(r"(?m)^recipients = .*", 'recipients = ["x@example.com"]'), (pat, rep)]
+        with pytest.raises(ValidationError, match=match):
+            self.load(monkeypatch, tmp_path, *subs)
+
+    def test_partial_stage_override_keeps_stage_defaults(self, monkeypatch, tmp_path):
+        s = self.load(monkeypatch, tmp_path, (r"(?m)^\[llm\.write\][^\[]*", '[llm.write]\nmodel = "x"\n\n'))
+        assert s.llm.write.model == "x" and s.llm.write.budget_usd == 0.15 and s.llm.write.timeout_s == 300
+        assert s.llm.group.model == "sonnet"
+
+    def test_missing_llm_section_uses_defaults(self, monkeypatch, tmp_path):
+        s = self.load(monkeypatch, tmp_path, (r"(?m)^\[llm\.\w+\][^\[]*", ""))
+        assert s.llm.model_dump() == digest.LLM_DEFAULTS
+
+    def test_send_backend_openai_rejected(self, monkeypatch, tmp_path):
+        with pytest.raises(ValidationError, match="claude-cli"):
+            self.load(monkeypatch, tmp_path, (r'(\[llm\.send\].*\n)backend = "claude-cli"', '\\1backend = "openai"'))
+
+    def test_env_override_wins(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("NEWS_DIGEST_SCHEDULE__HOUR", "8")
+        assert self.load(monkeypatch, tmp_path).schedule.hour == 8
+
+    def test_local_config_validates(self, monkeypatch, tmp_path):
+        if not (APP / "config.toml").exists():
+            pytest.skip("no local config.toml")
+        self.load(monkeypatch, tmp_path, path=APP / "config.toml")
+
+
 class FakeOpenAI:
     """Stands in for openai.OpenAI; records the request."""
     last = {}
@@ -178,7 +231,8 @@ class TestBackends:
             '[llm.send]\nbackend = "openai"'))
         env = dict(os.environ, NEWS_DIGEST_CONFIG=str(cfg))
         r = subprocess.run([sys.executable, "-c", "import digest"], cwd=APP, env=env, capture_output=True, text=True)
-        assert r.returncode == 1 and "claude-cli" in r.stderr
+        assert r.returncode == 1 and "llm.send" in r.stderr and "claude-cli" in r.stderr
+        assert "Traceback" not in r.stderr
 
 
 class TestPrompts:

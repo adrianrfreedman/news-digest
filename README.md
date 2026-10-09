@@ -9,9 +9,12 @@ Morning email, one section per configured region, built from RSS feeds by `claud
 - `prompt-group.md`, `prompt-write.md` — prompt templates; `{{...}}` filled from config.
 - Local, git-ignored: `config.toml`, `sources.json`, `state.json` (last sent slot), `stories.jsonl` (7-day story memory), `sent/`, `logs/`.
 
+## Config
+`config.toml` is validated at startup (pydantic-settings): unknown keys or bad values exit with a list of errors. Any key can be overridden by env var `NEWS_DIGEST_<SECTION>__<KEY>` (e.g. `NEWS_DIGEST_SCHEDULE__HOUR=8`); `NEWS_DIGEST_CONFIG` points at another config file.
+
 ## Setup
 1. `cp config.example.toml config.toml && cp sources.example.json sources.json`, then edit both.
-2. `uv sync` (Python 3.14, stdlib only at runtime).
+2. `uv sync` (Python 3.14; runtime deps: `pydantic-settings`, `openai`).
 3. `uv run python digest.py --install` — writes `~/Library/LaunchAgents/ai.newsdigest.daily.plist` from config and loads it. Re-run after changing the schedule.
 
 ## Run

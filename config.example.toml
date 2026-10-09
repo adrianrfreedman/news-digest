@@ -1,4 +1,6 @@
 # Copy to config.toml (git-ignored) and edit. Values below are examples.
+# Validated at startup: unknown keys and bad values exit with a list of errors.
+# Env vars override any key: NEWS_DIGEST_<SECTION>__<KEY>, e.g. NEWS_DIGEST_SCHEDULE__HOUR=8.
 
 [mail]
 admin = "you@example.com"          # gets shadow digests, health and failure emails
@@ -16,7 +18,7 @@ catchup_days = 3                   # max digests per run after the Mac was off; 
 [paths]
 # claude = "/path/to/claude"       # default: claude on PATH, else ~/.local/bin/claude
 
-# Model per stage. Omit a table or key to keep the default shown.
+# Model per stage. Omit a table or key to keep that stage's default shown.
 # backend = "claude-cli" (default; uses your Claude login) or "openai" (any OpenAI-compatible API:
 #   OpenRouter, OpenAI, Gemini, Anthropic, Ollama, a LiteLLM proxy). send must stay "claude-cli".
 # openai backend keys: model, base_url, api_key_env (name of the env var holding the key; put it in
