@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Daily news digest emailed by headless Claude Code"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []  # stdlib only at runtime
+dependencies = [
+    "openai>=3.26.1",
+]  # stdlib only at runtime
 
 [dependency-groups]
 dev = ["pytest>=8"]

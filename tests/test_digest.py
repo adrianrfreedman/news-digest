@@ -118,6 +118,69 @@ class TestLlmConfig:
         assert args[args.index("--tools") + 1] == "" and "--strict-mcp-config" in args
 
 
+class FakeOpenAI:
+    """Stands in for openai.OpenAI; records the request."""
+    last = {}
+
+    def __init__(self, **kw):
+        FakeOpenAI.last = {"client": kw}
+        self.chat = self
+        self.completions = self
+
+    def create(self, **kw):
+        FakeOpenAI.last["request"] = kw
+        from openai.types.chat import ChatCompletion
+        return ChatCompletion.model_validate({
+            "id": "x", "object": "chat.completion", "created": 0, "model": kw["model"],
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": '{"ok": 1}'}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}})
+
+
+class TestBackends:
+    def openai_stage(self, monkeypatch, **kw):
+        cfg = {**digest.LLM_DEFAULTS["write"], "backend": "openai", "model": "google/gemini-2.5-flash",
+               "base_url": "https://openrouter.ai/api/v1", "api_key_env": "TEST_KEY", **kw}
+        monkeypatch.setitem(digest.LLM, "write", cfg)
+        monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
+
+    def test_default_backend_is_claude_cli(self, monkeypatch, tmp_path):
+        seen = {}
+        monkeypatch.setattr(digest, "claude", lambda args, stdin, timeout, tag, wd: (seen.update(args=args) or "out", {}))
+        assert digest.complete("write", "p", "t", tmp_path) == "out"
+        assert seen["args"][1] == "haiku"
+
+    def test_openai_backend(self, monkeypatch, tmp_path):
+        self.openai_stage(monkeypatch, effort="low")
+        monkeypatch.setenv("TEST_KEY", "k")
+        assert digest.complete("write", "prompt", "t", tmp_path) == '{"ok": 1}'
+        req, client = FakeOpenAI.last["request"], FakeOpenAI.last["client"]
+        assert req["model"] == "google/gemini-2.5-flash" and req["reasoning_effort"] == "low"
+        assert req["messages"] == [{"role": "user", "content": "prompt"}]
+        assert client["base_url"] == "https://openrouter.ai/api/v1" and client["api_key"] == "k"
+        assert (tmp_path / "raw-t.json").exists()
+
+    def test_openai_backend_without_effort_omits_it(self, monkeypatch, tmp_path):
+        self.openai_stage(monkeypatch)
+        monkeypatch.setenv("TEST_KEY", "k")
+        digest.complete("write", "p", "t", tmp_path)
+        assert "reasoning_effort" not in FakeOpenAI.last["request"]
+
+    def test_missing_api_key_fails_clearly(self, monkeypatch, tmp_path):
+        self.openai_stage(monkeypatch)
+        monkeypatch.delenv("TEST_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="TEST_KEY"):
+            digest.complete("write", "p", "t", tmp_path)
+
+    def test_send_must_use_claude_cli(self, tmp_path):
+        cfg = tmp_path / "c.toml"
+        cfg.write_text((APP / "config.example.toml").read_text().replace(
+            '[llm.send]                         # copies the rendered email into the Gmail connector\nbackend = "claude-cli"',
+            '[llm.send]\nbackend = "openai"'))
+        env = dict(os.environ, NEWS_DIGEST_CONFIG=str(cfg))
+        r = subprocess.run([sys.executable, "-c", "import digest"], cwd=APP, env=env, capture_output=True, text=True)
+        assert r.returncode == 1 and "claude-cli" in r.stderr
+
+
 class TestPrompts:
     @pytest.fixture(autouse=True)
     def example_sources(self, monkeypatch):

@@ -37,6 +37,12 @@ CONFIG = Path(os.environ.get("NEWS_DIGEST_CONFIG", APP / "config.toml"))  # env 
 if not CONFIG.exists():
     sys.exit(f"news-digest: {CONFIG} not found. Copy config.example.toml to config.toml and edit it.")
 CFG = tomllib.loads(CONFIG.read_text())
+ENV_FILE = APP / ".env"  # local, git-ignored KEY=value lines for API keys; real env wins
+if ENV_FILE.exists():
+    for line in ENV_FILE.read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip("'\""))
 MAIL, SCHED, NEWS = CFG["mail"], CFG["schedule"], CFG["news"]
 SHADOW, ADMIN, RECIPIENTS = MAIL["shadow"], MAIL["admin"], MAIL["recipients"]  # shadow: admin only, "[SHADOW] " prefix
 TZ, UTC, HOUR = ZoneInfo(SCHED["timezone"]), timezone.utc, SCHED["hour"]
@@ -44,10 +50,13 @@ WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]  # index = date.wee
 SEND_DAYS = {WEEKDAYS.index(d) for d in SCHED["send_days"]}
 CATCHUP = SCHED["catchup_days"]  # max digests per run; older due slots are skipped
 # per-stage model settings; config [llm.<stage>] overrides these defaults
-LLM_DEFAULTS = {"group": {"model": "sonnet", "effort": "low", "budget_usd": 0.90, "timeout_s": 600},
-                "write": {"model": "haiku", "effort": "", "budget_usd": 0.15, "timeout_s": 300},
-                "send": {"model": "haiku", "effort": "", "budget_usd": 0.30, "timeout_s": 300}}
+LLM_DEFAULTS = {"group": {"backend": "claude-cli", "model": "sonnet", "effort": "low", "budget_usd": 0.90, "timeout_s": 600},
+                "write": {"backend": "claude-cli", "model": "haiku", "effort": "", "budget_usd": 0.15, "timeout_s": 300},
+                "send": {"backend": "claude-cli", "model": "haiku", "effort": "", "budget_usd": 0.30, "timeout_s": 300}}
+OPENAI_DEFAULTS = {"base_url": None, "api_key_env": "OPENAI_API_KEY", "max_output_tokens": 16000}
 LLM = {k: {**v, **CFG.get("llm", {}).get(k, {})} for k, v in LLM_DEFAULTS.items()}
+if LLM["send"]["backend"] != "claude-cli":
+    sys.exit("news-digest: [llm.send] must use backend = \"claude-cli\" (only it can reach the Gmail connector)")
 CLAUDE = CFG.get("paths", {}).get("claude") or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
 SOURCES = APP / NEWS["sources"]
 REGIONS = [r["name"] for r in NEWS["regions"]]
@@ -287,6 +296,34 @@ def no_tools(stage, scale=1):
     return args + ["--tools", "", "--strict-mcp-config", "--permission-mode", "dontAsk"], timeout
 
 
+def openai_call(stage, prompt, tag, wd, scale=1):
+    """One chat completion against any OpenAI-compatible API (OpenRouter, OpenAI, Gemini, Ollama, ...)."""
+    from openai import OpenAI  # lazy: only needed for this backend
+    c = {**OPENAI_DEFAULTS, **LLM[stage]}
+    key = os.environ.get(c["api_key_env"])
+    if not key:
+        raise RuntimeError(f"{tag}: ${c['api_key_env']} not set (put it in .env)")
+    t0 = time.time()
+    resp = OpenAI(base_url=c["base_url"], api_key=key, timeout=c["timeout_s"] * scale, max_retries=1).chat.completions.create(
+        model=c["model"], messages=[{"role": "user", "content": prompt}], max_tokens=c["max_output_tokens"],
+        **({"reasoning_effort": c["effort"]} if c["effort"] else {}))
+    (wd / f"raw-{tag}.json").write_text(resp.model_dump_json(indent=1))
+    u = resp.usage
+    RUN["calls"].append({"tag": tag, "backend": "openai", "models": [resp.model], "wall_s": round(time.time() - t0, 1),
+                         "cost_usd": round(getattr(u, "cost", None) or 0, 4),  # only some providers report cost
+                         "in_tok": u.prompt_tokens if u else None, "out_tok": u.completion_tokens if u else None,
+                         "finish": resp.choices[0].finish_reason})
+    return resp.choices[0].message.content or ""
+
+
+def complete(stage, prompt, tag, wd, scale=1):
+    """Tool-less completion for the group/write stages via the configured backend."""
+    if LLM[stage]["backend"] == "openai":
+        return openai_call(stage, prompt, tag, wd, scale)
+    args, timeout = no_tools(stage, scale)
+    return claude(args, prompt, timeout, tag, wd)[0]
+
+
 # ---------- ledger (stories.jsonl) ----------
 def load_ledger(day):
     """Latest line per key from the 7 days before `day`."""
@@ -365,8 +402,7 @@ def group(items, start, end, ledger, wd):
     body = (prompt + "\n## Already sent (last 7 days)\n" + (memory or "(none yet)") + "\n\n## Items\n"
             + "\n".join(item_line(i, items, True) for i in range(len(items))) + "\n")
     long = len(window_days(start, end)) > 1
-    args, timeout = no_tools("group", 2 if long else 1)
-    res, _ = claude(args, body, timeout, "group", wd)
+    res = complete("group", body, "group", wd, 2 if long else 1)
     return parse_json(res)["stories"]
 
 
@@ -484,13 +520,12 @@ def validate(section, w, items):
 
 
 def write_section(region, section, items, ledger, wd):
-    """Haiku writer + guards; retries once with feedback, then None (section fallback)."""
+    """Region writer + guards; retries once with feedback, then None (section fallback)."""
     feedback = []
     for attempt in (1, 2):
         try:
-            args, timeout = no_tools("write")
-            res, _ = claude(args, writer_input(region, section, items, ledger, feedback),
-                            timeout, f"write-{region}-{attempt}", wd)
+            res = complete("write", writer_input(region, section, items, ledger, feedback),
+                           f"write-{region}-{attempt}", wd)
             w = parse_json(res)
             feedback = validate(section, w, items)
         except Exception as e:  # noqa: BLE001
