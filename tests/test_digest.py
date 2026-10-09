@@ -94,6 +94,30 @@ class TestConfig:
         assert r.returncode == 1 and "config.example.toml" in r.stderr
 
 
+class TestLlmConfig:
+    def test_example_matches_defaults(self):
+        assert digest.LLM == digest.LLM_DEFAULTS
+
+    def test_args_include_effort_only_when_set(self):
+        args, timeout = digest.llm("group")
+        assert args == ["--model", "sonnet", "--max-budget-usd", "0.9", "--effort", "low"] and timeout == 600
+        args, _ = digest.llm("write")
+        assert "--effort" not in args and args[1] == "haiku"
+
+    def test_long_window_scales_budget_and_timeout(self):
+        args, timeout = digest.llm("group", 2)
+        assert args[3] == "1.8" and timeout == 1200
+
+    def test_partial_override_keeps_defaults(self, monkeypatch):
+        monkeypatch.setitem(digest.LLM, "write", {**digest.LLM_DEFAULTS["write"], "model": "sonnet"})
+        args, timeout = digest.llm("write")
+        assert args[1] == "sonnet" and timeout == 300
+
+    def test_no_tools_strips_tool_access(self):
+        args, _ = digest.no_tools("write")
+        assert args[args.index("--tools") + 1] == "" and "--strict-mcp-config" in args
+
+
 class TestPrompts:
     @pytest.fixture(autouse=True)
     def example_sources(self, monkeypatch):

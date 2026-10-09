@@ -4,7 +4,7 @@ Morning email, one section per configured region, built from RSS feeds by `claud
 
 ## Files
 - `digest.py` — the whole run: lock → due slots → fetch → Sonnet grouping → Haiku writers (guarded) → GN link decode → render → send → ledger.
-- `config.example.toml` — template for `config.toml`: recipients, shadow mode, schedule, reader, regions, scoring.
+- `config.example.toml` — template for `config.toml`: recipients, shadow mode, schedule, model per stage (`[llm.group|write|send]`: model, effort, budget, timeout), reader, regions, scoring.
 - `sources.example.json` — template for `sources.json`: feeds per tier (T/C/LQ) and region.
 - `prompt-group.md`, `prompt-write.md` — prompt templates; `{{...}}` filled from config.
 - Local, git-ignored: `config.toml`, `sources.json`, `state.json` (last sent slot), `stories.jsonl` (7-day story memory), `sent/`, `logs/`.

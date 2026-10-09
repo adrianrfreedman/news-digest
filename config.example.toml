@@ -16,6 +16,26 @@ catchup_days = 3                   # max digests per run after the Mac was off; 
 [paths]
 # claude = "/path/to/claude"       # default: claude on PATH, else ~/.local/bin/claude
 
+# Model per stage (claude -p). Omit a table or key to keep the default shown.
+# Long windows (e.g. Sunday after a day off) double group budget and timeout.
+[llm.group]                        # groups items into stories, scores them
+model = "sonnet"
+effort = "low"                     # "" = model default
+budget_usd = 0.90
+timeout_s = 600
+
+[llm.write]                        # one call per region, run in parallel
+model = "haiku"
+effort = ""
+budget_usd = 0.15
+timeout_s = 300
+
+[llm.send]                         # copies the rendered email into the Gmail connector
+model = "haiku"
+effort = ""
+budget_usd = 0.30
+timeout_s = 300
+
 [news]
 sources = "sources.json"           # copy sources.example.json
 reader = "readers who live in the UK and follow the US closely"
