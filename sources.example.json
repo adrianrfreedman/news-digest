@@ -1,0 +1,16 @@
+{
+"_note": "Example only: copy to sources.json and build your own list. tier: T=Trusted (sets the facts), C=Counterpoint (framing shown for contrast), LQ=Low-quality (flagged, never sets facts) — which outlets go in which tier is your choice. flags: M=Mixed-rated (needs corroboration), F=framing check, OP=opinion outlet, TO=titles only. pay: soft|hard. group: shared owner (corroboration independence). gn+loc = Google News site: search (loc = a gn_locales key).",
+"gn_locales": {"US": "hl=en-US&gl=US&ceid=US:en", "GB": "hl=en-GB&gl=GB&ceid=GB:en"},
+"feeds": [
+{"outlet": "BBC UK", "tier": "T", "region": "UK", "url": "https://feeds.bbci.co.uk/news/uk/rss.xml"},
+{"outlet": "Sky News", "tier": "T", "region": "UK", "url": "https://feeds.skynews.com/feeds/rss/uk.xml"},
+{"outlet": "ITV News", "tier": "T", "region": "UK", "gn": "site:itv.com", "loc": "GB"},
+{"outlet": "Reuters", "tier": "T", "region": "World", "gn": "site:reuters.com/world", "loc": "US"},
+{"outlet": "AP", "tier": "T", "region": "World", "gn": "site:apnews.com", "loc": "US"},
+{"outlet": "BBC News", "tier": "T", "region": "World", "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
+{"outlet": "DW", "tier": "T", "region": "World", "url": "https://rss.dw.com/rdf/rss-en-world"},
+{"outlet": "NPR", "tier": "T", "region": "US", "url": "https://feeds.npr.org/1001/rss.xml"},
+{"outlet": "PBS NewsHour", "tier": "T", "region": "US", "url": "https://www.pbs.org/newshour/feeds/rss/headlines"},
+{"outlet": "Axios", "tier": "T", "region": "US", "gn": "site:axios.com", "loc": "US"}
+]
+}
