@@ -21,7 +21,7 @@ The feed-region is a hint about where the outlet is based; decide by the story.
 Lines under "Already sent" are `key|region|last_seen (YYYY-MM-DD)|headline|state` — the latest line per story key from the last 7 days. `state` is what the readers already know.
 
 - If a story continues one above (same ongoing situation: same crisis, case, deal, disaster, election, or its direct consequences), REUSE THAT KEY EXACTLY. Never rename or re-spell it.
-- Otherwise mint a new key: 2–5 lowercase ASCII words joined by hyphens, naming the ongoing situation (not today's development), with a specific actor or place, no dates. {{KEY_EXAMPLES}}
+- Otherwise mint a new key: 2–6 lowercase ASCII words joined by hyphens, naming the ongoing situation (not today's development), with a specific actor or place, no dates. {{KEY_EXAMPLES}}
 - Split: the main thread keeps the old key; an offshoot gets a new key with `"parents": ["<old key>"]`. Merge: keep the dominant key and add `"parents": ["<absorbed key>"]`. Otherwise omit `parents`.
 - **For a continuing story, score only what is new relative to its `state`. If nothing material is new, leave the story out.**
 - Each key at most once.

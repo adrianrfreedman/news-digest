@@ -335,3 +335,13 @@ class TestGuardSend:
 
     def test_hook_uses_current_interpreter(self):
         assert sys.executable in digest.GUARD and "/usr/bin/python3" not in digest.GUARD
+
+
+class TestStoryKey:
+    @pytest.mark.parametrize("key", ["rail-talks", "uk-iranian-drone-plot-b1-withdrawal"])
+    def test_accepts_two_to_six_words(self, key):
+        assert digest.KEY.match(key)
+
+    @pytest.mark.parametrize("key", ["rail", "a-b-c-d-e-f-g", "Rail-Talks", "rail_talks"])
+    def test_rejects_bad_keys(self, key):
+        assert not digest.KEY.match(key)
