@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Daily news digest: RSS fetch → Sonnet grouping → 3 Haiku region writers → HTML → Gmail send via claude -p.
-launchd runs it Sun–Fri 07:00 and at load. Usage: digest.py [--selftest | --no-send]"""
+launchd runs it Sun–Fri 07:00 and at load. Usage: digest.py [--no-send]. Tests: uv run pytest"""
 import difflib
 import fcntl
 import json
@@ -804,55 +804,6 @@ def main():
         print(f"log: logs/run-{stamp}.json cost ${RUN['cost_usd']} wall {RUN['wall_s']}s")
 
 
-def selftest():
-    T = lambda *a: datetime(*a, tzinfo=TZ)  # noqa: E731
-    days = lambda r: [s.date() for s in r[0]]  # noqa: E731
-    D = lambda d: date(2026, 10, d)  # noqa: E731
-    assert days(due_slots(T(2026, 10, 8, 8), T(2026, 10, 7, 7))) == [D(8)]          # normal Thursday
-    assert due_slots(T(2026, 10, 8, 9), T(2026, 10, 8, 7)) == ([], 0)                # already sent → RunAtLoad no-op
-    assert due_slots(T(2026, 10, 8, 6, 59), T(2026, 10, 7, 7)) == ([], 0)            # before 07:00
-    assert days(due_slots(T(2026, 10, 10, 12), T(2026, 10, 8, 7))) == [D(9)]         # Saturday wake: Friday only
-    r = due_slots(T(2026, 10, 11, 9), T(2026, 10, 4, 7))                             # a week asleep
-    assert days(r) == [D(8), D(9), D(11)] and r[1] == 3, r
-    assert days(due_slots(T(2026, 10, 8, 18), None)) == [D(8)]                        # first run
-    assert days(due_slots(T(2026, 10, 10, 18), None)) == [D(9)]                       # first run on Saturday
-    h = lambda s: (window(s)[1] - window(s)[0]).total_seconds() / 3600  # noqa: E731
-    assert h(T(2026, 10, 8, 7)) == 24 and h(T(2026, 10, 11, 7)) == 48
-    assert h(T(2026, 10, 25, 7)) == 49                                               # Sunday across DST end
-    assert window(T(2026, 10, 11, 7))[0] == utc(T(2026, 10, 9, 7))
-
-    items = [{"tier": "T", "flags": []}, {"tier": "C", "flags": []}, {"tier": "T", "flags": ["OP"]}]
-    sec = [{"tier": "main", "item_ids": [0, 1, 2]}, {"tier": "brief", "item_ids": [0]}]
-
-    def out(**kw):
-        s1 = dict({"n": 1, "headline": "H", "summary": "S", "counterpoint": "X frames it as Y",
-                   "counterpoint_ids": ["1"], "analysis": [{"id": 2, "gist": "g"}]}, **kw)
-        return {"stories": [s1, {"n": 2, "headline": "short brief"}]}
-    w = out()
-    assert validate(sec, w, items) == [] and w["stories"][0]["counterpoint_ids"] == [1]  # digit string coerced
-    assert validate(sec, out(counterpoint_ids=[9]), items)                              # invented id
-    assert validate(sec, out(counterpoint_ids=["x1"]), items)                           # non-integer id
-    assert validate(sec, out(counterpoint_ids=[0]), items)                              # counterpoint cites a T item
-    assert validate(sec, out(analysis=[]), items)                                       # OP item but no Analysis
-    assert validate(sec, out(analysis=[{"id": 0, "gist": "g"}]), items)                 # analysis on a news item
-    assert validate(sec, out(summary=None), items)                                      # main without summary
-    assert validate(sec, {"stories": out()["stories"][:1]}, items)                      # story missing
-    long = out()
-    long["stories"][1]["headline"] = " ".join(["w"] * 19)
-    assert validate(sec, long, items)                                                   # brief > 18 words
-    many = [{"tier": "brief", "item_ids": [0, 1]} for _ in range(6)]
-    cps = {"stories": [{"n": n, "headline": "h", "counterpoint": "c", "counterpoint_ids": [1]} for n in range(1, 7)]}
-    assert any("counterpoints" in e for e in validate(many, cps, items))                # counterpoint inflation
-    ok = {"tool_name": "mcp__claude_ai_Gmail__send_message", "tool_input": {"to": allowed_to(), "subject": "s"}}
-    assert guard_send(ok) is None
-    assert guard_send({**ok, "tool_input": {"to": allowed_to() + ["x@evil.test"]}})            # extra recipient
-    assert guard_send({**ok, "tool_input": {"to": allowed_to(), "bcc": ["x@evil.test"]}})      # bcc
-    assert guard_send({"tool_name": "Bash", "tool_input": {}})                                  # other tool
-    assert guard_send({"tool_name": "Read", "tool_input": {"file_path": str(LOGS / "a.html")}}) is None
-    assert guard_send({"tool_name": "Read", "tool_input": {"file_path": "/Users/USER/.ssh/id_rsa"}})
-    print("selftest ok")
-
-
 def guard_main():
     """Hook entry: exit 2 blocks the tool call; the reason goes back to the model."""
     reason = guard_send(json.load(sys.stdin))
@@ -862,4 +813,4 @@ def guard_main():
 
 
 if __name__ == "__main__":
-    guard_main() if "--guard-send" in sys.argv else selftest() if "--selftest" in sys.argv else main()
+    guard_main() if "--guard-send" in sys.argv else main()

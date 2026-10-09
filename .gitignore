@@ -3,3 +3,5 @@ sent/
 state.json
 stories.jsonl
 __pycache__/
+.venv/
+.pytest_cache/

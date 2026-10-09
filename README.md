@@ -10,7 +10,7 @@ Morning email (UK → World → US) built from RSS feeds by `claude -p` and sent
 - Runtime (git-ignored): `state.json` (last sent slot), `stories.jsonl` (7-day story memory), `sent/<date>.html`, `logs/run-*.json` (cost, timings, warnings, feeds) and `logs/<date>/` (raw model I/O).
 
 ## Run
-- `/usr/bin/python3 digest.py --selftest` — slot/catch-up and writer-guard asserts.
+- `uv run pytest` — slot/catch-up, window, writer-guard and send-guard tests.
 - `/usr/bin/python3 digest.py --no-send` — full build to `logs/<date>/digest.html`, no send, no state.
 - `/usr/bin/python3 digest.py` — what launchd runs; no-op if nothing is due.
 
