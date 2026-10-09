@@ -1,7 +1,11 @@
+config.toml
+sources.json
+*.plist
 logs/
 sent/
 state.json
 stories.jsonl
-__pycache__/
 .venv/
+__pycache__/
 .pytest_cache/
+.ruff_cache/

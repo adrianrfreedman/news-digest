@@ -1,9 +1,17 @@
+import os
+import re
+import subprocess
+import sys
 from datetime import date, datetime
+from pathlib import Path
 
 import pytest
 
-import digest
-from digest import LOGS, TZ, allowed_to, due_slots, guard_send, utc, validate, window
+APP = Path(__file__).resolve().parent.parent
+os.environ["NEWS_DIGEST_CONFIG"] = str(APP / "config.example.toml")  # never the local config.toml
+
+import digest  # noqa: E402
+from digest import LOGS, TZ, allowed_to, due_slots, guard_send, utc, validate, window  # noqa: E402
 
 
 def T(*a):
@@ -46,6 +54,14 @@ class TestDueSlots:
         assert days(due_slots(T(*now), None)) == [D(expected)]
 
 
+    def test_saturday_never_due(self):
+        assert due_slots(T(2026, 10, 10, 23), T(2026, 10, 9, 7)) == ([], 0)
+
+    def test_custom_send_days(self, monkeypatch):
+        monkeypatch.setattr(digest, "SEND_DAYS", {0, 2, 4})  # Mon, Wed, Fri
+        assert days(due_slots(T(2026, 10, 12, 8), T(2026, 10, 7, 7))) == [D(9), D(12)]
+
+
 class TestWindow:
     def test_weekday_24h(self):
         assert hours(T(2026, 10, 8, 7)) == 24
@@ -56,6 +72,46 @@ class TestWindow:
 
     def test_sunday_across_dst_end(self):
         assert hours(T(2026, 10, 25, 7)) == 49
+
+    def test_starts_at_previous_send_day(self, monkeypatch):
+        monkeypatch.setattr(digest, "SEND_DAYS", {0, 2, 4})
+        assert hours(T(2026, 10, 12, 7)) == 72
+
+    def test_window_days_flags_long_windows(self):
+        assert len(digest.window_days(*window(T(2026, 10, 8, 7)))) == 1
+        assert len(digest.window_days(*window(T(2026, 10, 25, 7)))) == 2
+
+
+class TestConfig:
+    def test_example_config_loads(self):
+        assert digest.ADMIN == "you@example.com" and digest.SHADOW
+        assert digest.SEND_DAYS == {0, 1, 2, 3, 4, 6} and digest.HOUR == 7
+        assert digest.REGIONS == list(digest.RCOL)
+
+    def test_missing_config_exits_with_message(self, tmp_path):
+        env = dict(os.environ, NEWS_DIGEST_CONFIG=str(tmp_path / "nope.toml"))
+        r = subprocess.run([sys.executable, "-c", "import digest"], cwd=APP, env=env, capture_output=True, text=True)
+        assert r.returncode == 1 and "config.example.toml" in r.stderr
+
+
+class TestPrompts:
+    @pytest.fixture(autouse=True)
+    def example_sources(self, monkeypatch):
+        monkeypatch.setattr(digest, "SOURCES", APP / "sources.example.json")
+
+    def test_group_prompt_fully_filled(self):
+        p = digest.group_prompt(*window(T(2026, 10, 11, 7)))
+        assert not re.findall(r"\{\{\w+\}\}", p)
+        assert "48h ending 07:00" in p and "Sunday digest covering Friday and Saturday" in p
+        assert '"region": "' + "|".join(digest.REGIONS) + '"' in p
+
+    def test_weekday_group_prompt_has_no_long_note(self):
+        assert "covering" not in digest.group_prompt(*window(T(2026, 10, 8, 7)))
+
+    def test_writer_prompt_fully_filled(self):
+        p = digest.writer_input("World", [], [], {})
+        assert not re.findall(r"\{\{\w+\}\}", p)
+        assert "flag `F`: " in p and "**World**" in p
 
 
 ITEMS = [{"tier": "T", "flags": []}, {"tier": "C", "flags": []}, {"tier": "T", "flags": ["OP"]}]
@@ -126,4 +182,14 @@ class TestGuardSend:
 
     def test_shadow_mode_is_admin_only(self, monkeypatch):
         monkeypatch.setattr(digest, "SHADOW", True)
+        monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
         assert allowed_to() == [digest.ADMIN]
+        assert guard_send({"tool_name": SEND, "tool_input": {"to": [digest.ADMIN, "reader@example.com"]}})
+
+    def test_live_mode_sends_to_recipients(self, monkeypatch):
+        monkeypatch.setattr(digest, "SHADOW", False)
+        monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
+        assert guard_send({"tool_name": SEND, "tool_input": {"to": ["reader@example.com", digest.ADMIN]}}) is None
+
+    def test_hook_uses_current_interpreter(self):
+        assert sys.executable in digest.GUARD and "/usr/bin/python3" not in digest.GUARD

@@ -1,23 +1,28 @@
-#!/usr/bin/python3
-"""Daily news digest: RSS fetch → Sonnet grouping → 3 Haiku region writers → HTML → Gmail send via claude -p.
-launchd runs it Sun–Fri 07:00 and at load. Usage: digest.py [--no-send]. Tests: uv run pytest"""
+"""Daily news digest: RSS fetch → Sonnet grouping → Haiku region writers → HTML → Gmail send via claude -p.
+Config: config.toml. Usage: digest.py [--no-send | --install]. Tests: uv run pytest"""
 import difflib
 import fcntl
 import json
 import math
 import os
+import plistlib
 import re
+import shlex
+import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import time
+import tomllib
 import traceback
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from functools import cache
 from html import escape as _esc, unescape
 from http.cookiejar import CookieJar
 from pathlib import Path
@@ -25,26 +30,27 @@ from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
 
 # ---------- config ----------
-SHADOW = True  # shadow mode: admin only, subject prefixed "[SHADOW] "
-ADMIN = "admin@example.com"
-RECIPIENTS = [ADMIN]
-# Go-live only (set SHADOW = False first): RECIPIENTS = [ADMIN, "reader@example.com"]
-
 APP = Path(__file__).resolve().parent
 LOGS, SENT = APP / "logs", APP / "sent"
 STATE, LEDGER = APP / "state.json", APP / "stories.jsonl"
-CLAUDE = "/Users/USER/.local/bin/claude"
-TZ, UTC = ZoneInfo("Europe/London"), timezone.utc
-REGIONS = ["UK", "World", "US"]
-CATEGORIES = {"Tech", "Politics", "Economy & markets", "Security & defence", "Science & health",
-              "Business & startups", "Culture & sport", "Community news"}
-CAPS = {"lead": 2, "main": 6, "brief": 6}
+CONFIG = Path(os.environ.get("NEWS_DIGEST_CONFIG", APP / "config.toml"))  # env override is for tests
+if not CONFIG.exists():
+    sys.exit(f"news-digest: {CONFIG} not found. Copy config.example.toml to config.toml and edit it.")
+CFG = tomllib.loads(CONFIG.read_text())
+MAIL, SCHED, NEWS = CFG["mail"], CFG["schedule"], CFG["news"]
+SHADOW, ADMIN, RECIPIENTS = MAIL["shadow"], MAIL["admin"], MAIL["recipients"]  # shadow: admin only, "[SHADOW] " prefix
+TZ, UTC, HOUR = ZoneInfo(SCHED["timezone"]), timezone.utc, SCHED["hour"]
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]  # index = date.weekday()
+SEND_DAYS = {WEEKDAYS.index(d) for d in SCHED["send_days"]}
+CATCHUP = SCHED["catchup_days"]  # max digests per run; older due slots are skipped
+CLAUDE = CFG.get("paths", {}).get("claude") or shutil.which("claude") or str(Path.home() / ".local/bin/claude")
+SOURCES = APP / NEWS["sources"]
+REGIONS = [r["name"] for r in NEWS["regions"]]
+RCOL = {r["name"]: r["color"] for r in NEWS["regions"]}
+CATEGORIES = set(NEWS["categories"])
+CAPS, LINK_CAP = NEWS["caps"], NEWS["link_caps"]
 LIMITS = {"lead": "80–120 words", "main": "≤45 words", "brief": "headline only, ≤18 words"}
-LINK_CAP = {"lead": 4, "main": 3, "brief": 1}
-CATCHUP = 3  # max digests per run; older due slots are skipped
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-GN_LOCALE = {"US": "hl=en-US&gl=US&ceid=US:en", "GB": "hl=en-GB&gl=GB&ceid=GB:en",
-             "DE": "hl=de&gl=DE&ceid=DE:de"}
 MSG_ID = re.compile(r"`?([0-9a-f]{16})`?")
 KEY = re.compile(r"^[a-z0-9]+(-[a-z0-9]+){1,4}$")
 OPINION_URL = re.compile(r"/(opinion|opinions|commentary|comment|op-ed|editorial|columnists?|analysis)/", re.I)
@@ -64,15 +70,19 @@ def utc(d):
     return d.astimezone(UTC)
 
 
+def slot_at(day):
+    return datetime.combine(day, dtime(HOUR), tzinfo=TZ)
+
+
 def due_slots(now, last_sent):
-    """Unsent Sun–Fri 07:00 slots up to now, oldest first, newest CATCHUP kept → (slots, n_skipped).
+    """Unsent scheduled slots up to now, oldest first, newest CATCHUP kept → (slots, n_skipped).
     First run (no state) → latest slot only."""
     slots, day = [], now.astimezone(TZ).date()
     while day > now.astimezone(TZ).date() - timedelta(days=30):
-        s = datetime.combine(day, dtime(7), tzinfo=TZ)
+        s = slot_at(day)
         if last_sent and utc(s) <= utc(last_sent):
             break
-        if utc(s) <= utc(now) and day.weekday() != 5:  # 5 = Saturday
+        if utc(s) <= utc(now) and day.weekday() in SEND_DAYS:
             slots.append(s)
             if not last_sent:
                 break
@@ -82,19 +92,33 @@ def due_slots(now, last_sent):
 
 
 def window(slot):
-    """24h ending at the slot (Sunday: 48h from Friday 07:00), in local wall time so DST is honoured."""
-    back = 2 if slot.weekday() == 6 else 1
-    return utc(datetime.combine(slot.date() - timedelta(days=back), dtime(7), tzinfo=TZ)), utc(slot)
+    """Previous scheduled slot → this slot, in local wall time so DST is honoured."""
+    day = slot.astimezone(TZ).date() - timedelta(days=1)
+    while day.weekday() not in SEND_DAYS:
+        day -= timedelta(days=1)
+    return utc(slot_at(day)), utc(slot)
+
+
+def window_days(start, end):
+    """Local days the window spans (>1 after a day off)."""
+    s, e = start.astimezone(TZ).date(), end.astimezone(TZ).date()
+    return [s + timedelta(days=n) for n in range((e - s).days)]
 
 
 # ---------- fetch ----------
-class Redirect308(urllib.request.HTTPRedirectHandler):
-    def http_error_308(self, req, fp, code, msg, headers):  # py3.9 urllib doesn't follow 308
-        return self.http_error_307(req, fp, 307, msg, headers)
+@cache
+def https():
+    """HTTPS handler trusting macOS system roots too: /etc/ssl/cert.pem lacks newer ones (ISRG Root X2)."""
+    ctx = ssl.create_default_context()
+    pem = subprocess.run(["security", "find-certificate", "-a", "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"],
+                         capture_output=True, text=True).stdout
+    if pem:
+        ctx.load_verify_locations(cadata=pem)
+    return urllib.request.HTTPSHandler(context=ctx)
 
 
 def http_get(url, timeout=30):
-    op = urllib.request.build_opener(Redirect308, urllib.request.HTTPCookieProcessor())
+    op = urllib.request.build_opener(https(), urllib.request.HTTPCookieProcessor())
     with op.open(urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"}), timeout=timeout) as r:
         return r.read()
 
@@ -150,10 +174,10 @@ def parse_feed(body):
     return out
 
 
-def fetch_feed(f, start, end, when_h, scale):
+def fetch_feed(f, start, end, when_h, scale, gn_locales):
     if "gn" in f:
         q = urllib.parse.quote(f"{f['gn']} when:{when_h}h")
-        url = f"https://news.google.com/rss/search?q={q}&{GN_LOCALE[f['loc']]}"
+        url = f"https://news.google.com/rss/search?q={q}&{gn_locales[f['loc']]}"
     else:
         url = f["url"]
     t0 = time.time()
@@ -191,11 +215,12 @@ def fetch_feed(f, start, end, when_h, scale):
 
 
 def fetch_all(start, end):
-    feeds = json.loads((APP / "sources.json").read_text())["feeds"]
+    src = json.loads(SOURCES.read_text())
+    feeds = src["feeds"]
     when_h = max(24, math.ceil((datetime.now(UTC) - start).total_seconds() / 3600))  # GN `when:` is relative to now
     scale = max(1, round((end - start).total_seconds() / 86400))
     with ThreadPoolExecutor(max_workers=min(24, len(feeds))) as pool:
-        results = list(pool.map(lambda f: fetch_feed(f, start, end, when_h, scale), feeds))
+        results = list(pool.map(lambda f: fetch_feed(f, start, end, when_h, scale, src["gn_locales"]), feeds))
     items, seen_url, seen_title, report = [], set(), set(), []
     for f, its, status, dt in sorted(results, key=lambda r: "gn" in r[0]):  # native copies win dedupe
         name = f"{f['outlet']}{' GN' if 'gn' in f else ''}"
@@ -297,20 +322,39 @@ def item_line(i, items, trim):
             f"{it['published'][5:16].replace('T', ' ')} | {it['title']}" + (f" — {snip}" if snip else ""))
 
 
+# ---------- prompts ----------
+def fill(name, **kw):
+    """Prompt template with {{KEY}}s filled from config + kw."""
+    feeds = json.loads(SOURCES.read_text())["feeds"]
+    kw = {"READER": NEWS["reader"], "PROXIMITY": NEWS["proximity"], "SIGNIFICANCE": NEWS["significance"],
+          "KEY_EXAMPLES": NEWS["key_examples"], "SCORE_EXAMPLES": " ".join(NEWS["score_examples"]),
+          "CATEGORIES": ", ".join(NEWS["categories"]), "REGION_ENUM": "|".join(REGIONS),
+          "REGION_RULES": "\n".join(f"- **{r['name']}** — {r['rule']}" for r in NEWS["regions"]),
+          "FRAMING": ", ".join(dict.fromkeys(f["outlet"] for f in feeds if "F" in f.get("flags", "").split())),
+          "TIME": f"{HOUR:02d}:00 {SCHED['tz_label']}", **kw}
+    text = (APP / name).read_text()
+    for k, v in kw.items():
+        text = text.replace("{{" + k + "}}", str(v))
+    return text
+
+
+def group_prompt(start, end):
+    names = [f"{d:%A}" for d in window_days(start, end)]
+    note = f"; {end.astimezone(TZ):%A} digest covering {', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else ""
+    return fill("prompt-group.md", WINDOW_START=start.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
+                WINDOW_END=end.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
+                HOURS=round((end - start).total_seconds() / 3600), LONG_NOTE=note)
+
+
 def group(items, start, end, ledger, wd):
-    hours = round((end - start).total_seconds() / 3600)
-    prompt = ((APP / "prompt-group.md").read_text()
-              .replace("{{WINDOW_START}}", start.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"))
-              .replace("{{WINDOW_END}}", end.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"))
-              .replace("{{HOURS}}", str(hours))
-              .replace("{{SUNDAY_NOTE}}", "; Sunday digest covering Friday and Saturday" if hours > 30 else ""))
+    prompt = group_prompt(start, end)
     memory = "\n".join(f"{k}|{r['region']}|{r['date']}|{r['headline']}|{r.get('state', '')}"
                        for k, r in sorted(ledger.items(), key=lambda kv: (kv[1]["region"], kv[1]["date"]), reverse=True))
     body = (prompt + "\n## Already sent (last 7 days)\n" + (memory or "(none yet)") + "\n\n## Items\n"
             + "\n".join(item_line(i, items, True) for i in range(len(items))) + "\n")
-    sunday = hours > 30
-    res, _ = claude(no_tools("sonnet", 1.80 if sunday else 0.90) + ["--effort", "low"], body,
-                    1200 if sunday else 600, "group", wd)
+    long = len(window_days(start, end)) > 1
+    res, _ = claude(no_tools("sonnet", 1.80 if long else 0.90) + ["--effort", "low"], body,
+                    1200 if long else 600, "group", wd)
     return parse_json(res)["stories"]
 
 
@@ -388,7 +432,7 @@ def writer_input(region, section, items, ledger, feedback=""):
         blocks.append(f"### Story {n} — {s['tier']} ({LIMITS[s['tier']]})\nWorking headline: {s['headline']}\n"
                       f"SUPPORT: {sup}\nMEMORY: {mem}\n" + "\n".join(item_line(i, items, False) for i in s["item_ids"]))
     fb = f"\n\nYour previous answer failed these checks — fix them:\n- " + "\n- ".join(feedback) if feedback else ""
-    return (APP / "prompt-write.md").read_text().replace("{{REGION}}", region) + "\n" + "\n\n".join(blocks) + fb + "\n"
+    return fill("prompt-write.md", REGION=region) + "\n" + "\n\n".join(blocks) + fb + "\n"
 
 
 def as_id(v):
@@ -448,7 +492,7 @@ def write_section(region, section, items, ledger, wd):
 def gn_decode(gn_url):
     """GN article id → publisher URL via the batchexecute RPC (research 08)."""
     art = urllib.parse.urlparse(gn_url).path.rsplit("/", 1)[-1]
-    op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+    op = urllib.request.build_opener(https(), urllib.request.HTTPCookieProcessor(CookieJar()))
     page = op.open(urllib.request.Request(f"https://news.google.com/rss/articles/{art}", headers={"User-Agent": UA}),
                    timeout=20).read().decode("utf-8", "replace")
     sg = re.search(r'data-n-a-sg="([^"]+)"', page).group(1)
@@ -485,7 +529,6 @@ def resolve_links(ids, items):
 
 # ---------- render (v3 design: inline styles, one element per line) ----------
 INK, MUTED = "#1c1e21", "#5f6670"
-RCOL = {"UK": "#1f4e8c", "World": "#46505e", "US": "#2c6e49"}
 PLUM, GREY, AMBER = "#6d4c8d", "#8a9099", "#a15c07"
 SERIF = "font-family:Charter,'Iowan Old Style',Georgia,serif;"
 SANS = "font-family:Helvetica,Arial,sans-serif;"
@@ -561,6 +604,7 @@ def render(sections, items, slot, start, skipped):
 
     local, st = slot.astimezone(TZ), start.astimezone(TZ)
     day = f"{local:%A} {local.day} {local:%B}"
+    ampm = f"{HOUR % 12 or 12}{'am' if HOUR < 12 else 'pm'}"
     allst = [s for r in REGIONS for s in sections[r] or []]
     words = sum(len((x or "").split()) for s in allst for x in [s["headline"], s.get("summary"), s.get("counterpoint"), *(s.get("bullets") or [])])
     contents = ", ".join(f'<b style="color:{RCOL[r]};">{r}</b> {len(sections[r] or [])}' for r in REGIONS)
@@ -575,7 +619,7 @@ def render(sections, items, slot, start, skipped):
 <tr><td style="text-align:left;{SERIF}font-size:16px;line-height:1.55;color:{INK};">
 <p style="margin:0;{SANS}font-size:14px;font-weight:700;color:{MUTED};">Morning digest</p>
 <p style="margin:2px 0 8px;font-size:32px;line-height:1.15;font-weight:700;">{day}</p>
-<p style="margin:0;{SANS}font-size:14px;line-height:1.5;color:{MUTED};">News from 7am {st:%A} to 7am {local:%A}, UK time.<br>{len(allst)} stories, about {max(1, round(words / 238))} minutes: {contents}.{note}</p>
+<p style="margin:0;{SANS}font-size:14px;line-height:1.5;color:{MUTED};">News from {ampm} {st:%A} to {ampm} {local:%A}, {SCHED["tz_label"]}.<br>{len(allst)} stories, about {max(1, round(words / 238))} minutes: {contents}.{note}</p>
 {chr(10).join(section(r, sections[r]) for r in REGIONS)}
 <p style="margin:36px 0 0;padding-top:12px;border-top:1px solid #e3e5e8;{SANS}font-size:12px;line-height:1.6;color:{MUTED};">
 Blue links are trusted outlets. <span style="color:{PLUM};">Plum</span> links and Counterpoint notes come from counterpoint outlets.
@@ -611,7 +655,7 @@ def guard_send(ev):
 
 
 GUARD = json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
-    {"type": "command", "command": f"/usr/bin/python3 {APP / 'digest.py'} --guard-send"}]}]}})
+    {"type": "command", "command": f"{shlex.quote(sys.executable)} {shlex.quote(str(APP / 'digest.py'))} --guard-send"}]}]}})
 
 
 def send(path, subject, field, wd, tag):
@@ -658,7 +702,7 @@ def run_slot(slot, skipped, no_send):
     t1 = time.time()
     stories = group(items, start, end, ledger, wd)
     rec["group_s"], rec["grouped"] = round(time.time() - t1, 1), len(stories)
-    sections = select(stories, items, 7 if slot.weekday() == 6 else 6)
+    sections = select(stories, items, NEWS["threshold_long"] if len(window_days(start, end)) > 1 else NEWS["threshold"])
     check_keys([s for r in REGIONS for s in sections[r]], ledger)
 
     t1 = time.time()
@@ -804,6 +848,26 @@ def main():
         print(f"log: logs/run-{stamp}.json cost ${RUN['cost_usd']} wall {RUN['wall_s']}s")
 
 
+def install():
+    """Write the LaunchAgent from config and (re)load it. launchd fires in the Mac's local time."""
+    label, uid = "ai.newsdigest.daily", os.getuid()
+    plist = Path.home() / f"Library/LaunchAgents/{label}.plist"
+    LOGS.mkdir(exist_ok=True)
+    plist.write_bytes(plistlib.dumps({
+        "Label": label, "ProgramArguments": [sys.executable, str(APP / "digest.py")], "WorkingDirectory": str(APP),
+        "StartCalendarInterval": [{"Weekday": (d + 1) % 7, "Hour": HOUR, "Minute": 0} for d in sorted(SEND_DAYS)],
+        "RunAtLoad": True,
+        "EnvironmentVariables": {"PATH": os.environ["PATH"], "HOME": str(Path.home()),
+                                 "LANG": os.environ.get("LANG", "en_US.UTF-8")},
+        "StandardOutPath": str(LOGS / "launchd.out"), "StandardErrorPath": str(LOGS / "launchd.err")}))
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
+    for _ in range(5):  # bootstrap can fail briefly right after bootout
+        if subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)]).returncode == 0:
+            return print(f"installed and loaded {plist}")
+        time.sleep(1)
+    sys.exit(f"launchctl bootstrap failed for {plist}")
+
+
 def guard_main():
     """Hook entry: exit 2 blocks the tool call; the reason goes back to the model."""
     reason = guard_send(json.load(sys.stdin))
@@ -813,4 +877,4 @@ def guard_main():
 
 
 if __name__ == "__main__":
-    guard_main() if "--guard-send" in sys.argv else main()
+    guard_main() if "--guard-send" in sys.argv else install() if "--install" in sys.argv else main()

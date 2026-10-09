@@ -1,10 +1,10 @@
 [project]
 name = "news-digest"
 version = "0.1.0"
-description = "Daily UK / World / US news digest emailed by headless Claude Code"
+description = "Daily news digest emailed by headless Claude Code"
 readme = "README.md"
-requires-python = ">=3.9"
-dependencies = []  # stdlib only: launchd runs it with /usr/bin/python3
+requires-python = ">=3.14"
+dependencies = []  # stdlib only at runtime
 
 [dependency-groups]
 dev = ["pytest>=8"]

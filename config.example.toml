@@ -1,0 +1,55 @@
+# Copy to config.toml (git-ignored) and edit. Values below are examples.
+
+[mail]
+admin = "you@example.com"          # gets shadow digests, health and failure emails
+recipients = ["you@example.com"]
+# Go-live (set shadow = false first): recipients = ["you@example.com", "reader@example.com"]
+shadow = true                      # true: admin only, subject prefixed "[SHADOW] "
+
+[schedule]
+timezone = "Europe/London"        # should match the Mac's timezone (launchd fires in local time)
+tz_label = "UK time"           # shown in the email and prompts
+hour = 7
+send_days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri"]
+catchup_days = 3                   # max digests per run after the Mac was off; older days are skipped
+
+[paths]
+# claude = "/path/to/claude"       # default: claude on PATH, else ~/.local/bin/claude
+
+[news]
+sources = "sources.json"           # copy sources.example.json
+reader = "readers who live in the UK and follow the US closely"
+proximity = "directly affects life in the UK or the US"
+significance = "moments of major national weight score high even without new action: national memorial days, major terror attacks"
+key_examples = "Good: `rail-strike-talks`, `fed-rate-decisions`, `nhs-junior-doctors-dispute`. Bad: `ceasefire`, `talks-resume-monday`, `pm-news`."
+score_examples = [
+  "Bank of England cuts rate 25bp → 8.",
+  "Fed holds as expected → 5.",
+  "Commons committee advances a bill, final readings weeks away → 6.",
+  "Remembrance Day (national memorial, ceremonies) → 8.",
+  "Celebrity divorce → 2.",
+  "Day 3 of known ceasefire talks, no new terms → 4.",
+]
+# base ≥5 in one of these gets +1
+categories = ["Tech", "Politics", "Economy & markets", "Security & defence", "Science & health",
+              "Business & startups", "Culture & sport", "Community news"]
+threshold = 6                      # min final score
+threshold_long = 7                 # when the window spans >1 day (after a day off)
+caps = { lead = 2, main = 6, brief = 6 }       # stories per region per tier
+link_caps = { lead = 4, main = 3, brief = 1 }  # links per story
+
+# Regions in email order; rule = how the grouping model assigns a story to it.
+[[news.regions]]
+name = "UK"
+color = "#1f4e8c"
+rule = "happens in or mainly concerns the UK, incl. UK forces abroad and moves by other states aimed at the UK."
+
+[[news.regions]]
+name = "World"
+color = "#46505e"
+rule = "neither the UK nor the US."
+
+[[news.regions]]
+name = "US"
+color = "#2c6e49"
+rule = "happens in or mainly concerns the US."
