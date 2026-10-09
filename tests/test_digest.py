@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -199,7 +200,7 @@ class TestBackends:
 
     def test_default_backend_is_claude_cli(self, monkeypatch, tmp_path):
         seen = {}
-        monkeypatch.setattr(digest, "claude", lambda args, stdin, timeout, tag, wd: (seen.update(args=args) or "out", {}))
+        monkeypatch.setattr(digest, "claude", lambda args, stdin, timeout, tag, wd, env=None: (seen.update(args=args) or "out", {}))
         assert digest.complete("write", "p", "t", tmp_path) == "out"
         assert seen["args"][1] == "haiku"
 
@@ -251,7 +252,7 @@ class TestPrompts:
         assert "covering" not in digest.group_prompt(*window(T(2026, 10, 8, 7)))
 
     def test_writer_prompt_fully_filled(self):
-        p = digest.writer_input("World", [], [], {})
+        p = digest.writer_input("World", [], [], {}, D(9))
         assert not re.findall(r"\{\{\w+\}\}", p)
         assert "flag `F`: " in p and "**World**" in p
 
@@ -291,10 +292,13 @@ class TestValidate:
         w["stories"][1]["headline"] = " ".join(["w"] * 19)
         assert validate(SECTION, w, ITEMS)
 
-    def test_rejects_counterpoint_inflation(self):
-        many = [{"tier": "brief", "item_ids": [0, 1]} for _ in range(6)]
-        cps = {"stories": [{"n": n, "headline": "h", "counterpoint": "c", "counterpoint_ids": [1]} for n in range(1, 7)]}
-        assert any("counterpoints" in e for e in validate(many, cps, ITEMS))
+    @pytest.mark.parametrize("n,cps,ok", [(2, 1, True), (2, 2, False), (3, 1, True), (3, 2, False),
+                                          (4, 2, True), (6, 2, True), (6, 3, False)])
+    def test_counterpoint_cap_one_in_three(self, n, cps, ok):
+        section = [{"tier": "brief", "item_ids": [0, 1]} for _ in range(n)]
+        w = {"stories": [{"n": k, "headline": "h", "counterpoint": "c" if k <= cps else None, "counterpoint_ids": [1]}
+                         for k in range(1, n + 1)]}
+        assert (not any("counterpoints" in e for e in validate(section, w, ITEMS))) == ok
 
 
 SEND = "mcp__claude_ai_Gmail__send_message"
@@ -333,6 +337,79 @@ class TestGuardSend:
         monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
         assert guard_send({"tool_name": SEND, "tool_input": {"to": ["reader@example.com", digest.ADMIN]}}) is None
 
+    def test_live_mode_allows_admin_only_mail(self, monkeypatch):
+        monkeypatch.setattr(digest, "SHADOW", False)
+        monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
+        assert guard_send({"tool_name": SEND, "tool_input": {"to": [digest.ADMIN]}}) is None
+        assert guard_send({"tool_name": SEND, "tool_input": {"to": ["reader@example.com"]}})
+
+    def hook(self, tmp_path, ev):
+        marker = tmp_path / "m"
+        env = dict(os.environ, NEWS_DIGEST_SEND_MARKER=str(marker))
+        r = subprocess.run([sys.executable, str(APP / "digest.py"), "--guard-send"], input=json.dumps(ev),
+                           cwd=APP, env=env, capture_output=True, text=True, check=False)
+        return r.returncode, marker.exists()
+
+    def test_hook_marks_allowed_send(self, tmp_path):
+        assert self.hook(tmp_path, {"tool_name": SEND, "tool_input": {"to": allowed_to()}}) == (0, True)
+
+    @pytest.mark.parametrize("ev,code", [
+        ({"tool_name": SEND, "tool_input": {"to": ["x@evil.test"]}}, 2),
+        ({"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}, 2),
+        ({"tool_name": "Read", "tool_input": {"file_path": str(APP / "README.md")}}, 0),
+    ])
+    def test_hook_leaves_no_marker_otherwise(self, tmp_path, ev, code):
+        assert self.hook(tmp_path, ev) == (code, False)
+
+
+class TestSend:
+    def fake(self, monkeypatch, result="", touch=False, fail=False):
+        """Stub claude(): optionally touch the marker (guard allowed the send), then return `result` or raise."""
+        seen = {}
+
+        def claude(args, stdin, timeout, tag, wd, env=None):
+            seen.update(args=args, prompt=stdin, env=env)
+            if touch:
+                Path(env["NEWS_DIGEST_SEND_MARKER"]).touch()
+            if fail:
+                raise RuntimeError("send: timed out after 300s")
+            return result, {}
+        monkeypatch.setattr(digest, "claude", claude)
+        return seen
+
+    def test_id_is_success(self, monkeypatch, tmp_path):
+        seen = self.fake(monkeypatch, "`0123456789abcdef`", touch=True)
+        assert digest.send(tmp_path / "x.html", "s", "htmlBody", tmp_path, "send", ["a@b.c"]) == "0123456789abcdef"
+        assert 'to=["a@b.c"]' in seen["prompt"] and str(tmp_path / "send.attempted") == seen["env"]["NEWS_DIGEST_SEND_MARKER"]
+
+    @pytest.mark.parametrize("fail", [False, True])
+    def test_never_attempted_is_retryable(self, monkeypatch, tmp_path, fail):
+        self.fake(monkeypatch, "FAILED: Gmail not connected", fail=fail)
+        with pytest.raises(RuntimeError) as e:
+            digest.send(tmp_path / "x.html", "s", "htmlBody", tmp_path, "send", ["a@b.c"])
+        assert not isinstance(e.value, digest.SendUncertain)
+
+    @pytest.mark.parametrize("fail", [False, True])
+    def test_attempted_without_id_is_uncertain(self, monkeypatch, tmp_path, fail):
+        self.fake(monkeypatch, "FAILED: timeout", touch=True, fail=fail)
+        with pytest.raises(digest.SendUncertain):
+            digest.send(tmp_path / "x.html", "s", "htmlBody", tmp_path, "send", ["a@b.c"])
+
+    def test_stale_marker_is_cleared(self, monkeypatch, tmp_path):
+        (tmp_path / "send.attempted").touch()
+        self.fake(monkeypatch, "FAILED")
+        with pytest.raises(RuntimeError) as e:
+            digest.send(tmp_path / "x.html", "s", "htmlBody", tmp_path, "send", ["a@b.c"])
+        assert not isinstance(e.value, digest.SendUncertain)
+
+    def test_ops_mail_goes_to_admin_only(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(digest, "LOGS", tmp_path)
+        monkeypatch.setattr(digest, "SHADOW", False)
+        monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
+        seen = self.fake(monkeypatch, "0123456789abcdef")
+        digest.text_email("[news-digest] health", ["w"], "health-x")
+        assert f"to={json.dumps([digest.ADMIN])}" in seen["prompt"]
+
     def test_hook_uses_current_interpreter(self):
         assert sys.executable in digest.GUARD and "/usr/bin/python3" not in digest.GUARD
 
@@ -345,3 +422,75 @@ class TestStoryKey:
     @pytest.mark.parametrize("key", ["rail", "a-b-c-d-e-f-g", "Rail-Talks", "rail_talks"])
     def test_rejects_bad_keys(self, key):
         assert not digest.KEY.match(key)
+
+
+SINCE_LEDGER = {"a-b": {"date": "2026-10-08", "state": "s"}, "c-d": {"date": "2026-10-02", "state": "t"}}
+
+
+class TestSinceDay:
+    @pytest.mark.parametrize("story,expected", [
+        ({"key": "a-b"}, ("Thursday", "s")),
+        ({"key": "c-d"}, ("Fri 2 Oct", "t")),                    # 6 days back: a weekday alone is ambiguous
+        ({"key": "new-one", "parents": ["a-b"]}, ("Thursday", "s")),
+        ({"key": "new-one"}, (None, None)),
+    ])
+    def test_label(self, story, expected):
+        assert digest.since_day(story, SINCE_LEDGER, D(9)) == expected
+
+    def test_five_days_back_keeps_weekday(self):
+        assert digest.since_day({"key": "c-d"}, SINCE_LEDGER, D(7))[0] == "Friday"
+
+
+def rss(*pub_dates):
+    items = "".join(f"<item><title>t{n}</title><link>https://x.test/{n}</link><pubDate>{d}</pubDate></item>"
+                    for n, d in enumerate(pub_dates))
+    return f"<rss><channel>{items}</channel></rss>".encode()
+
+
+class TestFetch:
+    def run(self, monkeypatch, tmp_path, body):
+        src = tmp_path / "s.json"
+        src.write_text(json.dumps({"gn_locales": {}, "feeds": [
+            {"outlet": "X", "tier": "T", "region": "World", "url": "https://x.test/feed"}]}))
+        monkeypatch.setattr(digest, "SOURCES", src)
+        monkeypatch.setattr(digest, "http_get", lambda url, timeout=30: body)
+        monkeypatch.setitem(digest.RUN, "warnings", [])
+        items, _ = digest.fetch_all(*window(T(2026, 10, 8, 7)))
+        return items, digest.RUN["warnings"]
+
+    def test_empty_feed_warns(self, monkeypatch, tmp_path):
+        assert self.run(monkeypatch, tmp_path, rss()) == ([], ["feed empty: X: 0 items"])
+
+    def test_quiet_feed_does_not_warn(self, monkeypatch, tmp_path):
+        assert self.run(monkeypatch, tmp_path, rss("Mon, 05 Oct 2026 10:00:00 GMT")) == ([], [])
+
+    def test_error_warns(self, monkeypatch, tmp_path):
+        _, warnings = self.run(monkeypatch, tmp_path, b"not xml")
+        assert len(warnings) == 1 and warnings[0].startswith("feed error: X: ParseError")
+
+
+class Stop(Exception):
+    pass
+
+
+def stop(*a):
+    raise Stop
+
+
+class TestItemFloor:
+    def run(self, monkeypatch, tmp_path, n):
+        monkeypatch.setattr(digest, "LOGS", tmp_path)
+        monkeypatch.setattr(digest, "fetch_all", lambda start, end: ([{"title": "x"}] * n, []))
+        monkeypatch.setattr(digest, "group", stop)
+        monkeypatch.setitem(digest.RUN, "warnings", [])
+        monkeypatch.setitem(digest.RUN, "slots", [])
+        digest.run_slot(T(2026, 10, 8, 7), 0, True)
+
+    def test_zero_items_aborts(self, monkeypatch, tmp_path):
+        with pytest.raises(RuntimeError, match="0 items"):
+            self.run(monkeypatch, tmp_path, 0)
+
+    def test_few_items_warns_and_continues(self, monkeypatch, tmp_path):
+        with pytest.raises(Stop):
+            self.run(monkeypatch, tmp_path, 5)
+        assert digest.RUN["warnings"] == ["2026-10-08: only 5 items fetched"]

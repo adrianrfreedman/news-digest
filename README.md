@@ -25,4 +25,4 @@ Morning email, one section per configured region, built from RSS feeds by `claud
 - Uninstall: `launchctl bootout gui/$(id -u)/ai.newsdigest.daily && rm ~/Library/LaunchAgents/ai.newsdigest.daily.plist`
 
 ## Shadow mode
-`shadow = true` in `config.toml`: sends to `admin` only, subject prefixed `[SHADOW] `. To go live: set `shadow = false` and list every reader in `recipients`.
+`shadow = true` in `config.toml`: sends to `admin` only, subject prefixed `[SHADOW] `. To go live: set `shadow = false` and list every reader in `recipients`. Health and failure emails always go to `admin` only.
