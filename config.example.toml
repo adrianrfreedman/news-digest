@@ -55,6 +55,9 @@ catchup_days = 3                   # max digests per run after the Mac was off; 
 [news]
 sources = "sources.json"           # copy sources.example.json
 reader = "readers who live in the UK and follow the US closely"
+# Who your Counterpoint (C) and Low-quality (LQ) tiers are; which outlets go in each is up to you (sources.json).
+counterpoint_desc = "outlets whose framing is shown for contrast"
+low_quality_desc = "tabloids, clickbait, forums"
 proximity = "directly affects life in the UK or the US"
 significance = "moments of major national weight score high even without new action: national memorial days, major terror attacks"
 key_examples = "Good: `rail-strike-talks`, `fed-rate-decisions`, `nhs-junior-doctors-dispute`. Bad: `ceasefire`, `talks-resume-monday`, `pm-news`."

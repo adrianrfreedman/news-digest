@@ -239,6 +239,10 @@ class TestPrompts:
         assert "48h ending 07:00" in p and "Sunday digest covering Friday and Saturday" in p
         assert '"region": "' + "|".join(digest.REGIONS) + '"' in p
 
+    def test_tier_descriptions_come_from_config(self):
+        p = digest.group_prompt(*window(at(2026, 10, 8, 7)))
+        assert f"Counterpoint: {digest.NEWS.counterpoint_desc};" in p and digest.NEWS.low_quality_desc in p
+
     def test_weekday_group_prompt_has_no_long_note(self):
         assert "covering" not in digest.group_prompt(*window(at(2026, 10, 8, 7)))
 

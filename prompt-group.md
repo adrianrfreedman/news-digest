@@ -4,7 +4,7 @@ Window: {{WINDOW_START}} → {{WINDOW_END}} ({{HOURS}}h ending {{TIME}}{{LONG_NO
 
 `[id] TIER | outlet | feed-region | published UTC (MM-DD HH:MM) | title — snippet`
 
-TIER is `T` (Trusted), `C` (Counterpoint, outlets whose framing is shown for contrast; headline only) or `LQ` (low-quality: tabloids, clickbait, forums; headline only). Flags after the TIER: `OP` = opinion/analysis, `M` = Mixed-rated outlet, `F` = framing-check outlet, `TO` = titles only. Items may be in any language; write in English. You have titles and short snippets only — do not invent facts.
+TIER is `T` (Trusted), `C` (Counterpoint: {{COUNTERPOINT_DESC}}; headline only) or `LQ` (low-quality: {{LOW_QUALITY_DESC}}; headline only). Flags after the TIER: `OP` = opinion/analysis, `M` = Mixed-rated outlet, `F` = framing-check outlet, `TO` = titles only. Items may be in any language; write in English. You have titles and short snippets only — do not invent facts.
 
 ## Grouping
 

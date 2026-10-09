@@ -90,6 +90,8 @@ class Tiers(Strict):
 class News(Strict):
     sources: str
     reader: str
+    counterpoint_desc: str = "outlets whose framing is shown for contrast"  # who the C tier is, in prompts + legend
+    low_quality_desc: str = "tabloids, clickbait, forums"
     proximity: str
     significance: str
     key_examples: str
@@ -516,7 +518,7 @@ def item_line(i, items, trim):
 def fill(name, **kw):
     """Prompt template with {{KEY}}s filled from config + kw."""
     feeds = json.loads(SOURCES.read_text())["feeds"]
-    kw = {"READER": NEWS.reader, "PROXIMITY": NEWS.proximity, "SIGNIFICANCE": NEWS.significance,
+    kw = {"READER": NEWS.reader, "COUNTERPOINT_DESC": NEWS.counterpoint_desc, "LOW_QUALITY_DESC": NEWS.low_quality_desc, "PROXIMITY": NEWS.proximity, "SIGNIFICANCE": NEWS.significance,
           "KEY_EXAMPLES": NEWS.key_examples, "SCORE_EXAMPLES": " ".join(NEWS.score_examples),
           "CATEGORIES": ", ".join(NEWS.categories), "REGION_ENUM": "|".join(REGIONS),
           "REGION_RULES": "\n".join(f"- **{r.name}** — {r.rule}" for r in NEWS.regions),
@@ -844,7 +846,7 @@ def render(sections, items, slot, start, skipped):
 <p style="margin:0;{SANS}font-size:14px;line-height:1.5;color:{MUTED};">News from {ampm} {st:%A} to {ampm} {local:%A}, {SETTINGS.schedule.tz_label}.<br>{len(allst)} stories, about {max(1, round(words / 238))} minutes: {contents}.{note}</p>
 {chr(10).join(section_html(r, sections[r], items, hours) for r in REGIONS)}
 <p style="margin:36px 0 0;padding-top:12px;border-top:1px solid #e3e5e8;{SANS}font-size:12px;line-height:1.6;color:{MUTED};">
-Blue links are trusted outlets. <span style="color:{PLUM};">Plum</span> links and Counterpoint notes come from counterpoint outlets.
+Blue links are trusted outlets. <span style="color:{PLUM};">Plum</span> links and Counterpoint notes come from {NEWS.counterpoint_desc}.
 ⚠ marks a low-quality source. Free links come first; "(paywall)" marks a hard paywall.
 Summaries are machine-written from feed headlines and snippets.{" Shadow mode." if SHADOW else ""}</p>
 </td></tr></table>
