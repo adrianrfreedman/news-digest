@@ -142,6 +142,7 @@ class TestSettings:
         (r"shadow = true", "shadow = false", "admin must be in recipients"),
         (r'"#1f4e8c"', '"blue"', "color"),
         (r'name = "World"', 'name = "UK"', "unique"),
+        (r"catchup_days = 3", "catchup_days = 0", "catchup_days"),
     ])
     def test_rejects_bad_config(self, monkeypatch, tmp_path, pat, rep, match):
         subs = [(r"(?m)^recipients = .*", 'recipients = ["x@example.com"]'), (pat, rep)]

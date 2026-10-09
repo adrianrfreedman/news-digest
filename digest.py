@@ -64,7 +64,7 @@ class Schedule(Strict):
     tz_label: str
     hour: int = Field(ge=0, le=23)
     send_days: list[Literal["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]] = Field(min_length=1)
-    catchup_days: int = Field(ge=0)  # max digests per run; older due slots are skipped
+    catchup_days: int = Field(ge=1)  # max digests per run; older due slots are skipped (0 would mean no cap)
 
     @field_validator("timezone")
     @classmethod
