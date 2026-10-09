@@ -3,8 +3,8 @@
 Morning email, one section per configured region, built from RSS feeds by `claude -p` and sent via the claude.ai Gmail connector. launchd runs it on the configured days/hour and at load; missed days catch up (oldest first, capped).
 
 ## Files
-- `digest.py` — the whole run: lock → due slots → fetch → Sonnet grouping → Haiku writers (guarded) → GN link decode → render → send → ledger.
-- `config.example.toml` — template for `config.toml`: recipients, shadow mode, schedule, model per stage (`[llm.group|write|send]`: backend `claude-cli` or any OpenAI-compatible API via the `openai` SDK, model, effort, budget, timeout; API keys in git-ignored `.env`, see `.env.example`), reader, regions, scoring.
+- `digest.py` — the whole run: lock → due slots → fetch → story grouping → per-region writers (guarded) → GN link decode → render → send → ledger. Model per stage is set in `[llm.*]` (defaults: Sonnet groups, Haiku writes and sends).
+- `config.example.toml` — template for `config.toml`: recipients, shadow mode, schedule, model per stage (`[llm.group|write|send]`, defaults shown commented out: backend `claude-cli` or any OpenAI-compatible API via the `openai` SDK, model, effort, budget, timeout; send is always `claude-cli`; API keys in git-ignored `.env`, see `.env.example`), reader, regions, scoring.
 - `sources.example.json` — template for `sources.json`: feeds per tier (T/C/LQ) and region.
 - `prompt-group.md`, `prompt-write.md` — prompt templates; `{{...}}` filled from config.
 - Local, git-ignored: `config.toml`, `sources.json`, `state.json` (last sent slot), `stories.jsonl` (7-day story memory), `sent/`, `logs/`.
@@ -14,7 +14,7 @@ Morning email, one section per configured region, built from RSS feeds by `claud
 
 ## Setup
 1. `cp config.example.toml config.toml && cp sources.example.json sources.json`, then edit both.
-2. `uv sync` (Python 3.14; runtime deps: `pydantic-settings`, `openai`).
+2. `uv sync` (Python 3.14; runtime deps: `pydantic-settings`, `python-dotenv`, `openai`).
 3. `uv run python digest.py --install` — writes `~/Library/LaunchAgents/ai.newsdigest.daily.plist` from config and loads it. Re-run after changing the schedule.
 
 ## Run

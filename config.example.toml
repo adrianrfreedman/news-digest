@@ -18,13 +18,32 @@ catchup_days = 3                   # max digests per run after the Mac was off; 
 [paths]
 # claude = "/path/to/claude"       # default: claude on PATH, else ~/.local/bin/claude
 
-# Model per stage. Omit a table or key to keep that stage's default shown.
+# Model per stage. Defaults shown commented out (digest.py STAGE_DEFAULTS is the source of truth);
+# uncomment a table or single key to override. Long windows (e.g. Sunday after a day off) double the
+# group budget and timeout.
 # backend = "claude-cli" (default; uses your Claude login) or "openai" (any OpenAI-compatible API:
-#   OpenRouter, OpenAI, Gemini, Anthropic, Ollama, a LiteLLM proxy). send must stay "claude-cli".
+#   OpenRouter, OpenAI, Gemini, Anthropic, Ollama, a LiteLLM proxy).
 # openai backend keys: model, base_url, api_key_env (name of the env var holding the key; put it in
 #   the git-ignored .env), effort (sent as reasoning_effort), timeout_s, max_output_tokens (default 16000).
 #   budget_usd is claude-cli only.
-# Long windows (e.g. Sunday after a day off) double group budget and timeout.
+#
+# [llm.group]                      # groups items into stories, scores them
+# model = "sonnet"
+# effort = "low"                   # "" = model default
+# budget_usd = 0.90
+# timeout_s = 600
+#
+# [llm.write]                      # one call per region, run in parallel
+# model = "haiku"
+# effort = ""
+# budget_usd = 0.15
+# timeout_s = 300
+#
+# [llm.send]                       # copies the rendered email into the Gmail connector; always claude-cli
+# model = "haiku"
+# effort = ""
+# budget_usd = 0.30
+# timeout_s = 300
 #
 # Example: writers on Gemini Flash via OpenRouter
 # [llm.write]
@@ -32,26 +51,6 @@ catchup_days = 3                   # max digests per run after the Mac was off; 
 # base_url = "https://openrouter.ai/api/v1"
 # api_key_env = "OPENROUTER_API_KEY"
 # model = "google/gemini-2.5-flash"
-[llm.group]                        # groups items into stories, scores them
-backend = "claude-cli"
-model = "sonnet"
-effort = "low"                     # "" = model default
-budget_usd = 0.90
-timeout_s = 600
-
-[llm.write]                        # one call per region, run in parallel
-backend = "claude-cli"
-model = "haiku"
-effort = ""
-budget_usd = 0.15
-timeout_s = 300
-
-[llm.send]                         # copies the rendered email into the Gmail connector
-backend = "claude-cli"
-model = "haiku"
-effort = ""
-budget_usd = 0.30
-timeout_s = 300
 
 [news]
 sources = "sources.json"           # copy sources.example.json
