@@ -3,9 +3,9 @@
 # Env vars override any key: NEWS_DIGEST_<SECTION>__<KEY>, e.g. NEWS_DIGEST_SCHEDULE__HOUR=8.
 
 [mail]
-admin = "you@example.com"          # gets shadow digests, health and failure emails
-recipients = ["you@example.com"]
-# Go-live (set shadow = false first): recipients = ["you@example.com", "reader@example.com"]
+admin = "you@gmail.com"            # Gmail account that sends (app password in .env); gets shadow, health and failure emails
+recipients = ["you@gmail.com"]
+# Go-live (set shadow = false first): recipients = ["you@gmail.com", "reader@example.com"]
 shadow = true                      # true: admin only, subject prefixed "[SHADOW] "
 
 [schedule]
@@ -37,12 +37,6 @@ catchup_days = 3                   # max digests per run after the Mac was off; 
 # model = "haiku"
 # effort = ""
 # budget_usd = 0.15
-# timeout_s = 300
-#
-# [llm.send]                       # copies the rendered email into the Gmail connector; always claude-cli
-# model = "haiku"
-# effort = ""
-# budget_usd = 0.30
 # timeout_s = 300
 #
 # Example: writers on Gemini Flash via OpenRouter
