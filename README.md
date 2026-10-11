@@ -13,12 +13,13 @@ Morning email, one section per configured region, built from RSS feeds by `claud
 `config.toml` is validated at startup (pydantic-settings): unknown keys or bad values exit with a list of errors. Any key can be overridden by env var `NEWS_DIGEST_<SECTION>__<KEY>` (e.g. `NEWS_DIGEST_SCHEDULE__HOUR=8`); `NEWS_DIGEST_CONFIG` points at another config file.
 
 ## Setup
-1. `cp config.example.toml config.toml && cp sources.example.json sources.json && cp .env.example .env`, then edit all three. `admin` must be a Gmail account; put its [app password](https://myaccount.google.com/apppasswords) in `.env` as `GMAIL_APP_PASSWORD`.
+1. `cp config.example.toml config.toml && cp sources.example.json sources.json && cp .env.example .env`, then edit all three. `admin` must be a Gmail account; its [app password](https://myaccount.google.com/apppasswords) is read from the OS keyring (`uv run keyring set smtp.gmail.com <admin>`; macOS Keychain, Windows Credential Locker or Linux Secret Service) or `GMAIL_APP_PASSWORD` in `.env`.
 2. `uv sync` (Python 3.14; runtime deps: `pydantic-settings`, `python-dotenv`, `openai`).
 3. `uv run python digest.py --install` — writes `~/Library/LaunchAgents/ai.newsdigest.daily.plist` from config and loads it. Re-run after changing the schedule.
 
 ## Run
 - `uv run pytest` — slots/windows, config, prompts, writer guards, SMTP send (uses the example config).
+- `uv run ruff check . && uv run ruff format --check .` — lint and format (CI runs both plus pytest on every PR).
 - `uv run python digest.py --no-send` — full build to `logs/<date>/digest.html`; no email, no state change.
 - `uv run python digest.py` — what launchd runs; no-op if nothing is due.
 - Status: `launchctl print gui/$(id -u)/ai.newsdigest.daily`
