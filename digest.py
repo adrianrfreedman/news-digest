@@ -858,11 +858,21 @@ def allowed_to():
     return to
 
 
+def smtp_password():
+    """$GMAIL_APP_PASSWORD, else the login Keychain's internet password for smtp.gmail.com / ADMIN."""
+    if pw := os.environ.get(SMTP_PASSWORD_ENV):
+        return pw
+    r = subprocess.run(["security", "find-internet-password", "-s", SMTP_HOST, "-a", ADMIN, "-w"],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode or not r.stdout.strip():
+        raise RuntimeError(f"no Gmail app password: set ${SMTP_PASSWORD_ENV} or add a Keychain internet password "
+                           f"for server {SMTP_HOST}, account {ADMIN}")
+    return r.stdout.strip()
+
+
 def send(subject, body, to, html=False):
     """Gmail SMTP as ADMIN. Returns the Message-ID. Raises SendUncertain if it may have sent, else RuntimeError (safe to retry)."""
-    password = os.environ.get(SMTP_PASSWORD_ENV)
-    if not password:
-        raise RuntimeError(f"${SMTP_PASSWORD_ENV} not set (Gmail app password; put it in .env)")
+    password = smtp_password()
     msg = EmailMessage()
     msg["From"], msg["To"], msg["Subject"] = ADMIN, ", ".join(to), subject
     msg["Message-ID"] = make_msgid(domain="news-digest")
