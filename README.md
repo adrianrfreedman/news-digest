@@ -13,7 +13,7 @@ Morning email, one section per configured region, built from RSS feeds by `claud
 `config.toml` is validated at startup (pydantic-settings): unknown keys or bad values exit with a list of errors. Any key can be overridden by env var `NEWS_DIGEST_<SECTION>__<KEY>` (e.g. `NEWS_DIGEST_SCHEDULE__HOUR=8`); `NEWS_DIGEST_CONFIG` points at another config file.
 
 ## Setup
-1. `cp config.example.toml config.toml && cp sources.example.json sources.json && cp .env.example .env`, then edit all three. `admin` must be a Gmail account; put its [app password](https://myaccount.google.com/apppasswords) in `.env` as `GMAIL_APP_PASSWORD`.
+1. `cp config.example.toml config.toml && cp sources.example.json sources.json && cp .env.example .env`, then edit all three. `admin` must be a Gmail account; its [app password](https://myaccount.google.com/apppasswords) is read from the login Keychain (internet password, server `smtp.gmail.com`, account = `admin`) or `GMAIL_APP_PASSWORD` in `.env`.
 2. `uv sync` (Python 3.14; runtime deps: `pydantic-settings`, `python-dotenv`, `openai`).
 3. `uv run python digest.py --install` — writes `~/Library/LaunchAgents/ai.newsdigest.daily.plist` from config and loads it. Re-run after changing the schedule.
 

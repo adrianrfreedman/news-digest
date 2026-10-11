@@ -327,9 +327,21 @@ class TestSend:
 
     def test_missing_password_fails_before_connecting(self, monkeypatch, smtp):
         monkeypatch.delenv("GMAIL_APP_PASSWORD")
+        monkeypatch.setattr(digest.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 44, "", ""))
         with pytest.raises(RuntimeError, match="GMAIL_APP_PASSWORD"):
             digest.send("s", "b", ["a@b.c"])
         assert not smtp.sent
+
+    def test_falls_back_to_keychain(self, monkeypatch):
+        monkeypatch.delenv("GMAIL_APP_PASSWORD")
+        seen = {}
+
+        def run(cmd, **k):
+            seen["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, 0, "pw\n", "")
+        monkeypatch.setattr(digest.subprocess, "run", run)
+        assert digest.smtp_password() == "pw"
+        assert seen["cmd"][:2] == ["security", "find-internet-password"] and digest.ADMIN in seen["cmd"]
 
     @pytest.mark.parametrize("fail_on,exc", [
         ("login", digest.smtplib.SMTPAuthenticationError(535, b"bad")),
