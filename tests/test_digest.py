@@ -13,7 +13,7 @@ APP = Path(__file__).resolve().parent.parent
 os.environ["NEWS_DIGEST_CONFIG"] = str(APP / "config.example.toml")  # never the local config.toml
 
 import digest  # noqa: E402
-from digest import LOGS, TZ, UTC, allowed_to, due_slots, guard_send, validate, window  # noqa: E402
+from digest import TZ, UTC, allowed_to, due_slots, validate, window  # noqa: E402
 
 
 def at(*a):
@@ -86,7 +86,7 @@ class TestWindow:
 
 class TestConfig:
     def test_example_config_loads(self):
-        assert digest.ADMIN == "you@example.com" and digest.SHADOW
+        assert digest.ADMIN == "you@gmail.com" and digest.SHADOW
         assert digest.SEND_DAYS == {0, 1, 2, 3, 4, 6} and digest.HOUR == 7
         assert digest.REGIONS == list(digest.RCOL)
 
@@ -154,7 +154,7 @@ class TestSettings:
 
     def test_missing_llm_section_uses_defaults(self, monkeypatch, tmp_path):
         s = self.load(monkeypatch, tmp_path)
-        assert s.llm.group.model == "sonnet" and s.llm.send.budget_usd == 0.30
+        assert s.llm.group.model == "sonnet" and s.llm.write.budget_usd == 0.15
 
     def test_env_override_wins(self, monkeypatch, tmp_path):
         monkeypatch.setenv("NEWS_DIGEST_SCHEDULE__HOUR", "8")
@@ -218,14 +218,6 @@ class TestBackends:
         monkeypatch.delenv("TEST_KEY", raising=False)
         with pytest.raises(RuntimeError, match="TEST_KEY"):
             digest.complete("write", "p", "t", tmp_path)
-
-    def test_send_must_use_claude_cli(self, tmp_path):
-        cfg = tmp_path / "c.toml"
-        cfg.write_text((APP / "config.example.toml").read_text() + '\n[llm.send]\nbackend = "openai"\n')
-        env = dict(os.environ, NEWS_DIGEST_CONFIG=str(cfg))
-        r = subprocess.run([sys.executable, "-c", "import digest"], cwd=APP, env=env, capture_output=True, text=True)
-        assert r.returncode == 1 and "llm.send" in r.stderr and "claude-cli" in r.stderr
-        assert "Traceback" not in r.stderr
 
 
 class TestPrompts:
@@ -296,117 +288,85 @@ class TestValidate:
         assert (not any("counterpoints" in e for e in validate(section, w, ITEMS))) == ok
 
 
-SEND = "mcp__claude_ai_Gmail__send_message"
+class FakeSMTP:
+    """Stands in for smtplib.SMTP_SSL; `fail_on` = "login" or "send" raises `exc` there."""
+    sent, fail_on, exc = [], None, None
+
+    def __init__(self, host, port, timeout, context):
+        self.host = host
+
+    def login(self, user, password):
+        if self.fail_on == "login":
+            raise self.exc
+
+    def send_message(self, msg):
+        if self.fail_on == "send":
+            raise self.exc
+        FakeSMTP.sent.append(msg)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
 
 
-class TestGuardSend:
-    def test_allows_configured_recipients(self):
-        assert guard_send({"tool_name": SEND, "tool_input": {"to": allowed_to(), "subject": "s"}}) is None
+class TestSend:
+    @pytest.fixture(autouse=True)
+    def smtp(self, monkeypatch):
+        monkeypatch.setenv("GMAIL_APP_PASSWORD", "x")
+        FakeSMTP.sent, FakeSMTP.fail_on, FakeSMTP.exc = [], None, None
+        monkeypatch.setattr(digest.smtplib, "SMTP_SSL", FakeSMTP)
+        return FakeSMTP
 
-    @pytest.mark.parametrize("ti", [
-        {"to": ["x@evil.test"]},
-        {"to": allowed_to() + ["x@evil.test"]},
-        {"to": allowed_to(), "bcc": ["x@evil.test"]},
-        {"to": allowed_to(), "cc": ["x@evil.test"]},
-        {"to": allowed_to(), "attachments": [{"content": "eA=="}]},
+    def test_sends_html_from_admin(self, smtp):
+        mid = digest.send("subj", "<p>hi</p>", ["a@b.c"], html=True)
+        msg = smtp.sent[0]
+        assert msg["From"] == digest.ADMIN and msg["To"] == "a@b.c" and msg["Message-ID"] == mid
+        assert msg.get_content_type() == "text/html" and "<p>hi</p>" in msg.get_content()
+
+    def test_missing_password_fails_before_connecting(self, monkeypatch, smtp):
+        monkeypatch.delenv("GMAIL_APP_PASSWORD")
+        with pytest.raises(RuntimeError, match="GMAIL_APP_PASSWORD"):
+            digest.send("s", "b", ["a@b.c"])
+        assert not smtp.sent
+
+    @pytest.mark.parametrize("fail_on,exc", [
+        ("login", digest.smtplib.SMTPAuthenticationError(535, b"bad")),
+        ("login", OSError("no network")),
+        ("send", digest.smtplib.SMTPRecipientsRefused({})),
+        ("send", digest.smtplib.SMTPDataError(552, b"too big")),
     ])
-    def test_blocks_other_recipients_and_fields(self, ti):
-        assert guard_send({"tool_name": SEND, "tool_input": ti})
+    def test_nothing_sent_is_retryable(self, smtp, fail_on, exc):
+        smtp.fail_on, smtp.exc = fail_on, exc
+        with pytest.raises(RuntimeError) as e:
+            digest.send("s", "b", ["a@b.c"])
+        assert not isinstance(e.value, digest.SendUncertain)
 
-    def test_blocks_other_tools(self):
-        assert guard_send({"tool_name": "Bash", "tool_input": {"command": "ls"}})
+    @pytest.mark.parametrize("exc", [digest.smtplib.SMTPServerDisconnected("gone"), TimeoutError()])
+    def test_broken_mid_send_is_uncertain(self, smtp, exc):
+        smtp.fail_on, smtp.exc = "send", exc
+        with pytest.raises(digest.SendUncertain):
+            digest.send("s", "b", ["a@b.c"])
 
-    def test_read_limited_to_app_dir(self):
-        assert guard_send({"tool_name": "Read", "tool_input": {"file_path": str(LOGS / "a.html")}}) is None
-        assert guard_send({"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}})
-        assert guard_send({"tool_name": "Read", "tool_input": {"file_path": str(digest.APP) + "-evil/x"}})
+    def test_ops_mail_goes_to_admin_only(self, monkeypatch, tmp_path, smtp):
+        monkeypatch.setattr(digest, "LOGS", tmp_path)
+        monkeypatch.setattr(digest, "SHADOW", False)
+        monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
+        digest.text_email("[news-digest] health", ["w"], "health-x")
+        assert smtp.sent[0]["To"] == digest.ADMIN and smtp.sent[0].get_content_type() == "text/plain"
 
+
+class TestRecipients:
     def test_shadow_mode_is_admin_only(self, monkeypatch):
         monkeypatch.setattr(digest, "SHADOW", True)
         monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
         assert allowed_to() == [digest.ADMIN]
-        assert guard_send({"tool_name": SEND, "tool_input": {"to": [digest.ADMIN, "reader@example.com"]}})
 
     def test_live_mode_sends_to_recipients(self, monkeypatch):
         monkeypatch.setattr(digest, "SHADOW", False)
         monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
-        assert guard_send({"tool_name": SEND, "tool_input": {"to": ["reader@example.com", digest.ADMIN]}}) is None
-
-    def test_live_mode_allows_admin_only_mail(self, monkeypatch):
-        monkeypatch.setattr(digest, "SHADOW", False)
-        monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
-        assert guard_send({"tool_name": SEND, "tool_input": {"to": [digest.ADMIN]}}) is None
-        assert guard_send({"tool_name": SEND, "tool_input": {"to": ["reader@example.com"]}})
-
-    def hook(self, tmp_path, ev):
-        marker = tmp_path / "m"
-        env = dict(os.environ, NEWS_DIGEST_SEND_MARKER=str(marker))
-        r = subprocess.run([sys.executable, str(APP / "digest.py"), "--guard-send"], input=json.dumps(ev),
-                           cwd=APP, env=env, capture_output=True, text=True, check=False)
-        return r.returncode, marker.exists()
-
-    def test_hook_marks_allowed_send(self, tmp_path):
-        assert self.hook(tmp_path, {"tool_name": SEND, "tool_input": {"to": allowed_to()}}) == (0, True)
-
-    @pytest.mark.parametrize("ev,code", [
-        ({"tool_name": SEND, "tool_input": {"to": ["x@evil.test"]}}, 2),
-        ({"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}, 2),
-        ({"tool_name": "Read", "tool_input": {"file_path": str(APP / "README.md")}}, 0),
-    ])
-    def test_hook_leaves_no_marker_otherwise(self, tmp_path, ev, code):
-        assert self.hook(tmp_path, ev) == (code, False)
-
-
-class TestSend:
-    def fake(self, monkeypatch, result="", touch=False, fail=False):
-        """Stub claude(): optionally touch the marker (guard allowed the send), then return `result` or raise."""
-        seen = {}
-
-        def claude(args, stdin, timeout, tag, run_dir, env=None):
-            seen.update(args=args, prompt=stdin, env=env)
-            if touch:
-                Path(env["NEWS_DIGEST_SEND_MARKER"]).touch()
-            if fail:
-                raise RuntimeError("send: timed out after 300s")
-            return result, {}
-        monkeypatch.setattr(digest, "claude", claude)
-        return seen
-
-    def test_id_is_success(self, monkeypatch, tmp_path):
-        seen = self.fake(monkeypatch, "`0123456789abcdef`", touch=True)
-        assert digest.send(tmp_path / "x.html", "s", "htmlBody", tmp_path, "send", ["a@b.c"]) == "0123456789abcdef"
-        assert 'to=["a@b.c"]' in seen["prompt"] and str(tmp_path / "send.attempted") == seen["env"]["NEWS_DIGEST_SEND_MARKER"]
-
-    @pytest.mark.parametrize("fail", [False, True])
-    def test_never_attempted_is_retryable(self, monkeypatch, tmp_path, fail):
-        self.fake(monkeypatch, "FAILED: Gmail not connected", fail=fail)
-        with pytest.raises(RuntimeError) as e:
-            digest.send(tmp_path / "x.html", "s", "htmlBody", tmp_path, "send", ["a@b.c"])
-        assert not isinstance(e.value, digest.SendUncertain)
-
-    @pytest.mark.parametrize("fail", [False, True])
-    def test_attempted_without_id_is_uncertain(self, monkeypatch, tmp_path, fail):
-        self.fake(monkeypatch, "FAILED: timeout", touch=True, fail=fail)
-        with pytest.raises(digest.SendUncertain):
-            digest.send(tmp_path / "x.html", "s", "htmlBody", tmp_path, "send", ["a@b.c"])
-
-    def test_stale_marker_is_cleared(self, monkeypatch, tmp_path):
-        (tmp_path / "send.attempted").touch()
-        self.fake(monkeypatch, "FAILED")
-        with pytest.raises(RuntimeError) as e:
-            digest.send(tmp_path / "x.html", "s", "htmlBody", tmp_path, "send", ["a@b.c"])
-        assert not isinstance(e.value, digest.SendUncertain)
-
-    def test_ops_mail_goes_to_admin_only(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(digest, "LOGS", tmp_path)
-        monkeypatch.setattr(digest, "SHADOW", False)
-        monkeypatch.setattr(digest, "RECIPIENTS", [digest.ADMIN, "reader@example.com"])
-        seen = self.fake(monkeypatch, "0123456789abcdef")
-        digest.text_email("[news-digest] health", ["w"], "health-x")
-        assert f"to={json.dumps([digest.ADMIN])}" in seen["prompt"]
-
-    def test_hook_uses_current_interpreter(self):
-        assert sys.executable in digest.GUARD and "/usr/bin/python3" not in digest.GUARD
+        assert allowed_to() == [digest.ADMIN, "reader@example.com"]
 
 
 class TestStoryKey:
