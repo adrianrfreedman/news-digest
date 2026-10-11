@@ -3,7 +3,7 @@
 # Env vars override any key: NEWS_DIGEST_<SECTION>__<KEY>, e.g. NEWS_DIGEST_SCHEDULE__HOUR=8.
 
 [mail]
-admin = "you@gmail.com"            # Gmail account that sends (app password in Keychain or .env); gets shadow, health and failure emails
+admin = "you@gmail.com"            # Gmail account that sends (app password in OS keyring or .env); gets shadow, health and failure emails
 recipients = ["you@gmail.com"]
 # Go-live (set shadow = false first): recipients = ["you@gmail.com", "reader@example.com"]
 shadow = true                      # true: admin only, subject prefixed "[SHADOW] "

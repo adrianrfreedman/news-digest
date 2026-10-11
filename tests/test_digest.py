@@ -5,6 +5,7 @@ import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from pydantic import ValidationError
@@ -55,7 +56,6 @@ class TestDueSlots:
     def test_first_run_sends_latest_slot(self, now, expected):
         assert days(due_slots(at(*now), None)) == [oct_day(expected)]
 
-
     def test_saturday_never_due(self):
         assert due_slots(at(2026, 10, 10, 23), at(2026, 10, 9, 7)) == ([], 0)
 
@@ -87,8 +87,8 @@ class TestWindow:
 class TestConfig:
     def test_example_config_loads(self):
         assert digest.ADMIN == "you@gmail.com" and digest.SHADOW
-        assert digest.SEND_DAYS == {0, 1, 2, 3, 4, 6} and digest.HOUR == 7
-        assert digest.REGIONS == list(digest.RCOL)
+        assert {0, 1, 2, 3, 4, 6} == digest.SEND_DAYS and digest.HOUR == 7
+        assert list(digest.RCOL) == digest.REGIONS
 
     def test_missing_config_exits_with_message(self, tmp_path):
         env = dict(os.environ, NEWS_DIGEST_CONFIG=str(tmp_path / "nope.toml"))
@@ -132,16 +132,19 @@ class TestSettings:
     def test_example_validates(self, monkeypatch, tmp_path):
         assert self.load(monkeypatch, tmp_path).schedule.hour == 7
 
-    @pytest.mark.parametrize("pat,rep,match", [
-        (r"hour = 7", "hour = 7\nhuor = 7", "huor"),
-        (r"hour = 7", "hour = 24", "schedule.hour"),
-        (r"Europe/London", "Mars/Olympus", "unknown timezone"),
-        (r'send_days = \[', 'send_days = ["Sabbath", ', "send_days"),
-        (r"shadow = true", "shadow = false", "admin must be in recipients"),
-        (r'"#1f4e8c"', '"blue"', "color"),
-        (r'name = "World"', 'name = "UK"', "unique"),
-        (r"catchup_days = 3", "catchup_days = 0", "catchup_days"),
-    ])
+    @pytest.mark.parametrize(
+        "pat,rep,match",
+        [
+            (r"hour = 7", "hour = 7\nhuor = 7", "huor"),
+            (r"hour = 7", "hour = 24", "schedule.hour"),
+            (r"Europe/London", "Mars/Olympus", "unknown timezone"),
+            (r"send_days = \[", 'send_days = ["Sabbath", ', "send_days"),
+            (r"shadow = true", "shadow = false", "admin must be in recipients"),
+            (r'"#1f4e8c"', '"blue"', "color"),
+            (r'name = "World"', 'name = "UK"', "unique"),
+            (r"catchup_days = 3", "catchup_days = 0", "catchup_days"),
+        ],
+    )
     def test_rejects_bad_config(self, monkeypatch, tmp_path, pat, rep, match):
         subs = [(r"(?m)^recipients = .*", 'recipients = ["x@example.com"]'), (pat, rep)]
         with pytest.raises(ValidationError, match=match):
@@ -168,7 +171,8 @@ class TestSettings:
 
 class FakeOpenAI:
     """Stands in for openai.OpenAI; records the request."""
-    last = {}
+
+    last: ClassVar[dict] = {}
 
     def __init__(self, **kw):
         FakeOpenAI.last = {"client": kw}
@@ -178,22 +182,39 @@ class FakeOpenAI:
     def create(self, **kw):
         FakeOpenAI.last["request"] = kw
         from openai.types.chat import ChatCompletion
-        return ChatCompletion.model_validate({
-            "id": "x", "object": "chat.completion", "created": 0, "model": kw["model"],
-            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": '{"ok": 1}'}}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}})
+
+        return ChatCompletion.model_validate(
+            {
+                "id": "x",
+                "object": "chat.completion",
+                "created": 0,
+                "model": kw["model"],
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": '{"ok": 1}'}}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            }
+        )
 
 
 class TestBackends:
     def openai_stage(self, monkeypatch, **kw):
-        cfg = {**digest.Llm().model_dump()["write"], "backend": "openai", "model": "google/gemini-2.5-flash",
-               "base_url": "https://openrouter.ai/api/v1", "api_key_env": "TEST_KEY", **kw}
+        cfg = {
+            **digest.Llm().model_dump()["write"],
+            "backend": "openai",
+            "model": "google/gemini-2.5-flash",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key_env": "TEST_KEY",
+            **kw,
+        }
         monkeypatch.setitem(digest.LLM, "write", cfg)
         monkeypatch.setattr("openai.OpenAI", FakeOpenAI)
 
     def test_default_backend_is_claude_cli(self, monkeypatch, tmp_path):
         seen = {}
-        monkeypatch.setattr(digest, "claude", lambda args, stdin, timeout, tag, run_dir, env=None: (seen.update(args=args) or "out", {}))
+        monkeypatch.setattr(
+            digest, "claude", lambda args, stdin, timeout, tag, run_dir, env=None: (seen.update(args=args) or "out", {})
+        )
         assert digest.complete("write", "p", "t", tmp_path) == "out"
         assert seen["args"][1] == "haiku"
 
@@ -249,8 +270,17 @@ SECTION = [{"tier": "main", "item_ids": [0, 1, 2]}, {"tier": "brief", "item_ids"
 
 
 def writer_out(**kw):
-    s1 = dict({"n": 1, "headline": "H", "summary": "S", "counterpoint": "X frames it as Y",
-               "counterpoint_ids": ["1"], "analysis": [{"id": 2, "gist": "g"}]}, **kw)
+    s1 = dict(
+        {
+            "n": 1,
+            "headline": "H",
+            "summary": "S",
+            "counterpoint": "X frames it as Y",
+            "counterpoint_ids": ["1"],
+            "analysis": [{"id": 2, "gist": "g"}],
+        },
+        **kw,
+    )
     return {"stories": [s1, {"n": 2, "headline": "short brief"}]}
 
 
@@ -260,14 +290,17 @@ class TestValidate:
         assert validate(SECTION, w, ITEMS) == []
         assert w["stories"][0]["counterpoint_ids"] == [1]
 
-    @pytest.mark.parametrize("kw", [
-        {"counterpoint_ids": [9]},                        # invented id
-        {"counterpoint_ids": ["x1"]},                     # non-integer id
-        {"counterpoint_ids": [0]},                        # counterpoint cites a Trusted item
-        {"analysis": []},                                 # opinion item but no Analysis
-        {"analysis": [{"id": 0, "gist": "g"}]},           # Analysis on a news item
-        {"summary": None},                                # main without summary
-    ])
+    @pytest.mark.parametrize(
+        "kw",
+        [
+            {"counterpoint_ids": [9]},  # invented id
+            {"counterpoint_ids": ["x1"]},  # non-integer id
+            {"counterpoint_ids": [0]},  # counterpoint cites a Trusted item
+            {"analysis": []},  # opinion item but no Analysis
+            {"analysis": [{"id": 0, "gist": "g"}]},  # Analysis on a news item
+            {"summary": None},  # main without summary
+        ],
+    )
     def test_rejects_rule_breaks(self, kw):
         assert validate(SECTION, writer_out(**kw), ITEMS)
 
@@ -279,17 +312,24 @@ class TestValidate:
         w["stories"][1]["headline"] = " ".join(["w"] * 19)
         assert validate(SECTION, w, ITEMS)
 
-    @pytest.mark.parametrize("n,cps,ok", [(2, 1, True), (2, 2, False), (3, 1, True), (3, 2, False),
-                                          (4, 2, True), (6, 2, True), (6, 3, False)])
+    @pytest.mark.parametrize(
+        "n,cps,ok",
+        [(2, 1, True), (2, 2, False), (3, 1, True), (3, 2, False), (4, 2, True), (6, 2, True), (6, 3, False)],
+    )
     def test_counterpoint_cap_one_in_three(self, n, cps, ok):
         section = [{"tier": "brief", "item_ids": [0, 1]} for _ in range(n)]
-        w = {"stories": [{"n": k, "headline": "h", "counterpoint": "c" if k <= cps else None, "counterpoint_ids": [1]}
-                         for k in range(1, n + 1)]}
+        w = {
+            "stories": [
+                {"n": k, "headline": "h", "counterpoint": "c" if k <= cps else None, "counterpoint_ids": [1]}
+                for k in range(1, n + 1)
+            ]
+        }
         assert (not any("counterpoints" in e for e in validate(section, w, ITEMS))) == ok
 
 
 class FakeSMTP:
     """Stands in for smtplib.SMTP_SSL; `fail_on` = "login" or "send" raises `exc` there."""
+
     sent, fail_on, exc = [], None, None
 
     def __init__(self, host, port, timeout, context):
@@ -327,28 +367,35 @@ class TestSend:
 
     def test_missing_password_fails_before_connecting(self, monkeypatch, smtp):
         monkeypatch.delenv("GMAIL_APP_PASSWORD")
-        monkeypatch.setattr(digest.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 44, "", ""))
+        monkeypatch.setattr(digest.keyring, "get_password", lambda *a: None)
         with pytest.raises(RuntimeError, match="GMAIL_APP_PASSWORD"):
             digest.send("s", "b", ["a@b.c"])
         assert not smtp.sent
 
-    def test_falls_back_to_keychain(self, monkeypatch):
+    def test_no_keyring_backend_is_a_missing_password(self, monkeypatch):
         monkeypatch.delenv("GMAIL_APP_PASSWORD")
-        seen = {}
 
-        def run(cmd, **k):
-            seen["cmd"] = cmd
-            return subprocess.CompletedProcess(cmd, 0, "pw\n", "")
-        monkeypatch.setattr(digest.subprocess, "run", run)
-        assert digest.smtp_password() == "pw"
-        assert seen["cmd"][:2] == ["security", "find-internet-password"] and digest.ADMIN in seen["cmd"]
+        def broken(*a):
+            raise digest.keyring.errors.NoKeyringError
 
-    @pytest.mark.parametrize("fail_on,exc", [
-        ("login", digest.smtplib.SMTPAuthenticationError(535, b"bad")),
-        ("login", OSError("no network")),
-        ("send", digest.smtplib.SMTPRecipientsRefused({})),
-        ("send", digest.smtplib.SMTPDataError(552, b"too big")),
-    ])
+        monkeypatch.setattr(digest.keyring, "get_password", broken)
+        with pytest.raises(RuntimeError, match="keyring set"):
+            digest.smtp_password()
+
+    def test_falls_back_to_keyring(self, monkeypatch):
+        monkeypatch.delenv("GMAIL_APP_PASSWORD")
+        monkeypatch.setattr(digest.keyring, "get_password", lambda svc, user: f"{svc}|{user}")
+        assert digest.smtp_password() == f"smtp.gmail.com|{digest.ADMIN}"
+
+    @pytest.mark.parametrize(
+        "fail_on,exc",
+        [
+            ("login", digest.smtplib.SMTPAuthenticationError(535, b"bad")),
+            ("login", OSError("no network")),
+            ("send", digest.smtplib.SMTPRecipientsRefused({})),
+            ("send", digest.smtplib.SMTPDataError(552, b"too big")),
+        ],
+    )
     def test_nothing_sent_is_retryable(self, smtp, fail_on, exc):
         smtp.fail_on, smtp.exc = fail_on, exc
         with pytest.raises(RuntimeError) as e:
@@ -395,12 +442,15 @@ SINCE_LEDGER = {"a-b": {"date": "2026-10-08", "state": "s"}, "c-d": {"date": "20
 
 
 class TestSinceDay:
-    @pytest.mark.parametrize("story,expected", [
-        ({"key": "a-b"}, ("Thursday", "s")),
-        ({"key": "c-d"}, ("Fri 2 Oct", "t")),                    # 6 days back: a weekday alone is ambiguous
-        ({"key": "new-one", "parents": ["a-b"]}, ("Thursday", "s")),
-        ({"key": "new-one"}, (None, None)),
-    ])
+    @pytest.mark.parametrize(
+        "story,expected",
+        [
+            ({"key": "a-b"}, ("Thursday", "s")),
+            ({"key": "c-d"}, ("Fri 2 Oct", "t")),  # 6 days back: a weekday alone is ambiguous
+            ({"key": "new-one", "parents": ["a-b"]}, ("Thursday", "s")),
+            ({"key": "new-one"}, (None, None)),
+        ],
+    )
     def test_label(self, story, expected):
         assert digest.since_day(story, SINCE_LEDGER, oct_day(9)) == expected
 
@@ -409,16 +459,24 @@ class TestSinceDay:
 
 
 def rss(*pub_dates):
-    items = "".join(f"<item><title>t{n}</title><link>https://x.test/{n}</link><pubDate>{d}</pubDate></item>"
-                    for n, d in enumerate(pub_dates))
+    items = "".join(
+        f"<item><title>t{n}</title><link>https://x.test/{n}</link><pubDate>{d}</pubDate></item>"
+        for n, d in enumerate(pub_dates)
+    )
     return f"<rss><channel>{items}</channel></rss>".encode()
 
 
 class TestFetch:
     def run(self, monkeypatch, tmp_path, body):
         src = tmp_path / "s.json"
-        src.write_text(json.dumps({"gn_locales": {}, "feeds": [
-            {"outlet": "X", "tier": "T", "region": "World", "url": "https://x.test/feed"}]}))
+        src.write_text(
+            json.dumps(
+                {
+                    "gn_locales": {},
+                    "feeds": [{"outlet": "X", "tier": "T", "region": "World", "url": "https://x.test/feed"}],
+                }
+            )
+        )
         monkeypatch.setattr(digest, "SOURCES", src)
         monkeypatch.setattr(digest, "http_get", lambda url, timeout=30: body)
         monkeypatch.setitem(digest.RUN, "warnings", [])
@@ -464,12 +522,15 @@ class TestItemFloor:
 
 
 class TestSelect:
-    @pytest.mark.parametrize("items,base,kept", [
-        ([{"tier": "T", "flags": []}], 6, True),
-        ([{"tier": "LQ", "flags": []}], 7, False),                # unconfirmed needs final ≥ 8
-        ([{"tier": "LQ", "flags": []}], 8, True),
-        ([{"tier": "T", "flags": ["OP"]}], 10, False),            # opinion-only never kept
-    ])
+    @pytest.mark.parametrize(
+        "items,base,kept",
+        [
+            ([{"tier": "T", "flags": []}], 6, True),
+            ([{"tier": "LQ", "flags": []}], 7, False),  # unconfirmed needs final ≥ 8
+            ([{"tier": "LQ", "flags": []}], 8, True),
+            ([{"tier": "T", "flags": ["OP"]}], 10, False),  # opinion-only never kept
+        ],
+    )
     def test_support_filter(self, items, base, kept):
         items = [dict(it, outlet="X", group="X", pay="") for it in items]
         out = digest.select([{"region": "World", "base": base, "item_ids": [0]}], items, 6)

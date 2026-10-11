@@ -1,5 +1,6 @@
 """Daily news digest: RSS fetch → story grouping → per-region writers → HTML → Gmail SMTP send.
 Model per stage is configurable ([llm.*]). Config: config.toml. Usage: digest.py [--no-send | --install]. Tests: uv run pytest"""
+
 import difflib
 import fcntl
 import json
@@ -20,16 +21,20 @@ import traceback
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, time as dtime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
+from datetime import time as dtime
 from email.message import EmailMessage
 from email.utils import make_msgid, parsedate_to_datetime
 from functools import cache, partial
-from html import escape as _esc, unescape
+from html import escape as _esc
+from html import unescape
 from pathlib import Path
 from typing import Literal
 from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
 
+import keyring
+import keyring.errors
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettingsSource
@@ -71,7 +76,7 @@ class Schedule(Strict):
     def known_tz(cls, v):
         try:
             ZoneInfo(v)
-        except (ValueError, KeyError):
+        except ValueError, KeyError:
             raise ValueError(f"unknown timezone {v!r}") from None
         return v
 
@@ -124,8 +129,10 @@ class Stage(Strict):
 
 
 # Source of truth for stage defaults; config.example.toml shows them commented out.
-STAGE_DEFAULTS = {"group": {"model": "sonnet", "effort": "low", "budget_usd": 0.90, "timeout_s": 600},
-                  "write": {"model": "haiku", "effort": "", "budget_usd": 0.15, "timeout_s": 300}}
+STAGE_DEFAULTS = {
+    "group": {"model": "sonnet", "effort": "low", "budget_usd": 0.90, "timeout_s": 600},
+    "write": {"model": "haiku", "effort": "", "budget_usd": 0.15, "timeout_s": 300},
+}
 
 
 class Llm(Strict):
@@ -145,6 +152,7 @@ class Paths(Strict):
 
 class Settings(BaseSettings):
     """CONFIG toml, overridden by NEWS_DIGEST_<SECTION>__<KEY> env vars."""
+
     model_config = SettingsConfigDict(env_prefix="NEWS_DIGEST_", env_nested_delimiter="__", extra="forbid")
     mail: Mail
     schedule: Schedule
@@ -153,7 +161,9 @@ class Settings(BaseSettings):
     news: News
 
     @classmethod
-    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):
         return init_settings, env_settings, TomlConfigSettingsSource(settings_cls, CONFIG)
 
 
@@ -164,10 +174,12 @@ try:
 except tomllib.TOMLDecodeError as e:
     sys.exit(f"news-digest: {CONFIG}: {e}")
 except ValidationError as e:
-    sys.exit(f"news-digest: invalid {CONFIG}:\n" + "\n".join(
-        f"  {'.'.join(map(str, err['loc'])) or '(top)'}: {err['msg']}" for err in e.errors()))
+    sys.exit(
+        f"news-digest: invalid {CONFIG}:\n"
+        + "\n".join(f"  {'.'.join(map(str, err['loc'])) or '(top)'}: {err['msg']}" for err in e.errors())
+    )
 SHADOW, ADMIN, RECIPIENTS = SETTINGS.mail.shadow, SETTINGS.mail.admin, SETTINGS.mail.recipients
-TZ, UTC, HOUR = ZoneInfo(SETTINGS.schedule.timezone), timezone.utc, SETTINGS.schedule.hour
+TZ, UTC, HOUR = ZoneInfo(SETTINGS.schedule.timezone), UTC, SETTINGS.schedule.hour
 SEND_DAYS = {WEEKDAYS.index(d) for d in SETTINGS.schedule.send_days}
 CATCHUP = SETTINGS.schedule.catchup_days
 LLM = SETTINGS.llm.model_dump()  # {stage: {key: value}}
@@ -244,8 +256,11 @@ def is_long_window(start, end):
 def https():
     """HTTPS handler trusting macOS system roots too: /etc/ssl/cert.pem lacks newer ones (ISRG Root X2)."""
     ctx = ssl.create_default_context()
-    pem = subprocess.run(["security", "find-certificate", "-a", "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"],
-                         capture_output=True, text=True).stdout
+    pem = subprocess.run(
+        ["security", "find-certificate", "-a", "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"],
+        capture_output=True,
+        text=True,
+    ).stdout
     if pem:
         ctx.load_verify_locations(cadata=pem)
     return urllib.request.HTTPSHandler(context=ctx)
@@ -263,7 +278,9 @@ def http_get(url, timeout=30):
 
 def wait_network():
     """Probe until the network is up (after wake); add a grace period if it wasn't up at first."""
-    for n in range(40):  # ponytail: 40 × 15s ≈ 10 min, then the run fails into the 15-min retry; lengthen if wakes keep failing
+    for n in range(
+        40
+    ):  # ponytail: 40 × 15s ≈ 10 min, then the run fails into the 15-min retry; lengthen if wakes keep failing
         try:
             socket.create_connection(("news.google.com", 443), 5).close()
             if n:
@@ -293,7 +310,7 @@ def txt(el, *tags):
 def parse_date(s):
     try:
         d = parsedate_to_datetime(s)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         try:
             d = datetime.fromisoformat(s.replace("Z", "+00:00"))
         except ValueError:
@@ -303,12 +320,27 @@ def parse_date(s):
 
 def parse_feed(body):
     root, atom = ET.fromstring(body), "{http://www.w3.org/2005/Atom}"
-    out = [(txt(i, "title"), txt(i, "link", "guid"), txt(i, "description"),
-            txt(i, "pubDate", "{http://purl.org/dc/elements/1.1/}date"), txt(i, "source")) for i in root.iter("item")]
+    out = [
+        (
+            txt(i, "title"),
+            txt(i, "link", "guid"),
+            txt(i, "description"),
+            txt(i, "pubDate", "{http://purl.org/dc/elements/1.1/}date"),
+            txt(i, "source"),
+        )
+        for i in root.iter("item")
+    ]
     for e in root.iter(atom + "entry"):
         link = e.find(atom + "link")
-        out.append((txt(e, atom + "title"), link.get("href") if link is not None else "",
-                    txt(e, atom + "summary", atom + "content"), txt(e, atom + "published", atom + "updated"), ""))
+        out.append(
+            (
+                txt(e, atom + "title"),
+                link.get("href") if link is not None else "",
+                txt(e, atom + "summary", atom + "content"),
+                txt(e, atom + "published", atom + "updated"),
+                "",
+            )
+        )
     return out
 
 
@@ -345,13 +377,24 @@ def fetch_feed(feed, start, end, when_h, scale, gn_locales):
         if feed["outlet"] == "AFP" and AFP_NOISE.search(title):
             continue
         op = OPINION in flags or bool(OPINION_TITLE.search(title)) or (not is_gn and bool(OPINION_URL.search(link)))
-        items.append({"outlet": feed["outlet"], "tier": feed["tier"], "region_hint": feed["region"],
-                      "flags": [x for x in flags if x != OPINION] + ([OPINION] if op else []),
-                      "pay": feed.get("pay", ""), "group": feed.get("group", feed["outlet"]), "gn": is_gn,
-                      "published": d.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ"), "title": title,
-                      "snippet": clean(desc)[:160],  # ponytail: 160-char snippet; upgrade: full text for chosen stories
-                      "url": link})
-    cap = (40 if is_gn else 30) * scale  # ponytail: items per feed per window-day, bounds grouping input; raise if a key feed clips
+        items.append(
+            {
+                "outlet": feed["outlet"],
+                "tier": feed["tier"],
+                "region_hint": feed["region"],
+                "flags": [x for x in flags if x != OPINION] + ([OPINION] if op else []),
+                "pay": feed.get("pay", ""),
+                "group": feed.get("group", feed["outlet"]),
+                "gn": is_gn,
+                "published": d.astimezone(UTC).strftime("%Y-%m-%dT%H:%MZ"),
+                "title": title,
+                "snippet": clean(desc)[:160],  # ponytail: 160-char snippet; upgrade: full text for chosen stories
+                "url": link,
+            }
+        )
+    cap = (
+        40 if is_gn else 30
+    ) * scale  # ponytail: items per feed per window-day, bounds grouping input; raise if a key feed clips
     return feed, items[:cap], len(raw), f"{len(raw)} items, {len(items)} in window", time.time() - t0
 
 
@@ -364,10 +407,18 @@ def fetch_all(start, end):
     with ThreadPoolExecutor(max_workers=min(24, len(feeds))) as pool:
         results = list(pool.map(fetch, feeds))
     items, seen_url, seen_title, report = [], set(), set(), []
-    for feed, feed_items, n_raw, status, secs in sorted(results, key=lambda r: "gn" in r[0]):  # native copies win dedupe
+    for feed, feed_items, n_raw, status, secs in sorted(
+        results, key=lambda r: "gn" in r[0]
+    ):  # native copies win dedupe
         name = f"{feed['outlet']}{' GN' if 'gn' in feed else ''}"
-        report.append({"feed": name, "status": status, "s": round(secs, 1),
-                       "n": len(feed_items) if feed_items is not None else None})
+        report.append(
+            {
+                "feed": name,
+                "status": status,
+                "s": round(secs, 1),
+                "n": len(feed_items) if feed_items is not None else None,
+            }
+        )
         if feed_items is None:
             warn(f"feed error: {name}: {status}")
         elif not n_raw:  # empty or dead; 0-in-window with older items is just a quiet feed
@@ -387,33 +438,50 @@ def claude(args, stdin, timeout, tag, run_dir, env=None):
     """claude -p with a hard timeout (kills the process group). Returns (result text, stats)."""
     cmd = [CLAUDE, "-p", "--output-format", "json", "--no-session-persistence", *args]
     t0 = time.time()
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         text=True, cwd=APP, start_new_session=True, env=env)
+    p = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=APP,
+        start_new_session=True,
+        env=env,
+    )
     try:
         out, err = p.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         os.killpg(p.pid, signal.SIGKILL)
         p.communicate()
         RUN["calls"].append({"tag": tag, "timeout": timeout})
-        raise RuntimeError(f"{tag}: timed out after {timeout}s")
+        raise RuntimeError(f"{tag}: timed out after {timeout}s") from None
     (run_dir / f"raw-{tag}.json").write_text(out + ("\n--- stderr ---\n" + err if err else ""))
     try:
         res = json.loads(out)
     except ValueError:
-        raise RuntimeError(f"{tag}: exit {p.returncode}, no JSON: {(err or out)[-300:]}")
+        raise RuntimeError(f"{tag}: exit {p.returncode}, no JSON: {(err or out)[-300:]}") from None
     u = res.get("usage") or {}
-    stat = {"tag": tag, "exit": p.returncode, "subtype": res.get("subtype"), "is_error": res.get("is_error"),
-            "wall_s": round(time.time() - t0, 1), "cost_usd": round(res.get("total_cost_usd") or 0, 4),
-            "models": list((res.get("modelUsage") or {})),
-            "in_tok": u.get("input_tokens", 0) + u.get("cache_creation_input_tokens", 0) + u.get("cache_read_input_tokens", 0),
-            "out_tok": u.get("output_tokens"), "denials": len(res.get("permission_denials") or [])}
+    stat = {
+        "tag": tag,
+        "exit": p.returncode,
+        "subtype": res.get("subtype"),
+        "is_error": res.get("is_error"),
+        "wall_s": round(time.time() - t0, 1),
+        "cost_usd": round(res.get("total_cost_usd") or 0, 4),
+        "models": list(res.get("modelUsage") or {}),
+        "in_tok": u.get("input_tokens", 0)
+        + u.get("cache_creation_input_tokens", 0)
+        + u.get("cache_read_input_tokens", 0),
+        "out_tok": u.get("output_tokens"),
+        "denials": len(res.get("permission_denials") or []),
+    }
     RUN["calls"].append(stat)
     return res.get("result") or "", stat
 
 
 def parse_json(text):
     # ponytail: first "{" to last "}" skips prose/fences around one object; upgrade: schema-constrained output
-    return json.loads(text[text.find("{"): text.rfind("}") + 1])
+    return json.loads(text[text.find("{") : text.rfind("}") + 1])
 
 
 def cli_args(stage, scale=1):
@@ -425,26 +493,40 @@ def cli_args(stage, scale=1):
 
 def tool_less_args(stage, scale=1):
     args, timeout = cli_args(stage, scale)
-    return args + ["--tools", "", "--strict-mcp-config", "--permission-mode", "dontAsk"], timeout
+    return [*args, "--tools", "", "--strict-mcp-config", "--permission-mode", "dontAsk"], timeout
 
 
 def openai_call(stage, prompt, tag, run_dir, scale=1):
     """One chat completion against any OpenAI-compatible API (OpenRouter, OpenAI, Gemini, Ollama, ...)."""
     from openai import OpenAI  # lazy: only needed for this backend
+
     c = LLM[stage]
     key = os.environ.get(c["api_key_env"])
     if not key:
         raise RuntimeError(f"{tag}: ${c['api_key_env']} not set (put it in .env)")
     t0 = time.time()
-    resp = OpenAI(base_url=c["base_url"], api_key=key, timeout=c["timeout_s"] * scale, max_retries=1).chat.completions.create(
-        model=c["model"], messages=[{"role": "user", "content": prompt}], max_tokens=c["max_output_tokens"],
-        **({"reasoning_effort": c["effort"]} if c["effort"] else {}))
+    resp = OpenAI(
+        base_url=c["base_url"], api_key=key, timeout=c["timeout_s"] * scale, max_retries=1
+    ).chat.completions.create(
+        model=c["model"],
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=c["max_output_tokens"],
+        **({"reasoning_effort": c["effort"]} if c["effort"] else {}),
+    )
     (run_dir / f"raw-{tag}.json").write_text(resp.model_dump_json(indent=1))
     u = resp.usage
-    RUN["calls"].append({"tag": tag, "backend": "openai", "models": [resp.model], "wall_s": round(time.time() - t0, 1),
-                         "cost_usd": round(getattr(u, "cost", None) or 0, 4),  # only some providers report cost
-                         "in_tok": u.prompt_tokens if u else None, "out_tok": u.completion_tokens if u else None,
-                         "finish": resp.choices[0].finish_reason})
+    RUN["calls"].append(
+        {
+            "tag": tag,
+            "backend": "openai",
+            "models": [resp.model],
+            "wall_s": round(time.time() - t0, 1),
+            "cost_usd": round(getattr(u, "cost", None) or 0, 4),  # only some providers report cost
+            "in_tok": u.prompt_tokens if u else None,
+            "out_tok": u.completion_tokens if u else None,
+            "finish": resp.choices[0].finish_reason,
+        }
+    )
     return resp.choices[0].message.content or ""
 
 
@@ -497,22 +579,35 @@ def item_line(i, items, trim):
     it = items[i]
     snip = it["snippet"]
     if trim:
-        snip = snip[:100].rstrip() if it["tier"] == TRUSTED else ""  # ponytail: cuts input ~25%; untrim if grouping misses context
+        snip = (
+            snip[:100].rstrip() if it["tier"] == TRUSTED else ""
+        )  # ponytail: cuts input ~25%; untrim if grouping misses context
     reg = f" | {it['region_hint']}" if trim else ""
-    return (f"[{i}] {' '.join([it['tier']] + it['flags'])} | {it['outlet']}{reg} | "
-            f"{it['published'][5:16].replace('T', ' ')} | {it['title']}" + (f" — {snip}" if snip else ""))
+    return (
+        f"[{i}] {' '.join([it['tier']] + it['flags'])} | {it['outlet']}{reg} | "
+        f"{it['published'][5:16].replace('T', ' ')} | {it['title']}" + (f" — {snip}" if snip else "")
+    )
 
 
 # ---------- prompts ----------
 def fill(name, **kw):
     """Prompt template with {{KEY}}s filled from config + kw."""
     feeds = json.loads(SOURCES.read_text())["feeds"]
-    kw = {"READER": NEWS.reader, "COUNTERPOINT_DESC": NEWS.counterpoint_desc, "LOW_QUALITY_DESC": NEWS.low_quality_desc, "PROXIMITY": NEWS.proximity, "SIGNIFICANCE": NEWS.significance,
-          "KEY_EXAMPLES": NEWS.key_examples, "SCORE_EXAMPLES": " ".join(NEWS.score_examples),
-          "CATEGORIES": ", ".join(NEWS.categories), "REGION_ENUM": "|".join(REGIONS),
-          "REGION_RULES": "\n".join(f"- **{r.name}** — {r.rule}" for r in NEWS.regions),
-          "FRAMING": ", ".join(dict.fromkeys(f["outlet"] for f in feeds if FRAMING in f.get("flags", "").split())),
-          "TIME": f"{HOUR:02d}:00 {SETTINGS.schedule.tz_label}", **kw}
+    kw = {
+        "READER": NEWS.reader,
+        "COUNTERPOINT_DESC": NEWS.counterpoint_desc,
+        "LOW_QUALITY_DESC": NEWS.low_quality_desc,
+        "PROXIMITY": NEWS.proximity,
+        "SIGNIFICANCE": NEWS.significance,
+        "KEY_EXAMPLES": NEWS.key_examples,
+        "SCORE_EXAMPLES": " ".join(NEWS.score_examples),
+        "CATEGORIES": ", ".join(NEWS.categories),
+        "REGION_ENUM": "|".join(REGIONS),
+        "REGION_RULES": "\n".join(f"- **{r.name}** — {r.rule}" for r in NEWS.regions),
+        "FRAMING": ", ".join(dict.fromkeys(f["outlet"] for f in feeds if FRAMING in f.get("flags", "").split())),
+        "TIME": f"{HOUR:02d}:00 {SETTINGS.schedule.tz_label}",
+        **kw,
+    }
     text = (APP / name).read_text()
     for k, v in kw.items():
         text = text.replace("{{" + k + "}}", str(v))
@@ -521,18 +616,32 @@ def fill(name, **kw):
 
 def group_prompt(start, end):
     names = [f"{d:%A}" for d in window_days(start, end)]
-    note = f"; {end.astimezone(TZ):%A} digest covering {', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else ""
-    return fill("prompt-group.md", WINDOW_START=start.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
-                WINDOW_END=end.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
-                HOURS=window_hours(start, end), LONG_NOTE=note)
+    note = (
+        f"; {end.astimezone(TZ):%A} digest covering {', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else ""
+    )
+    return fill(
+        "prompt-group.md",
+        WINDOW_START=start.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
+        WINDOW_END=end.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
+        HOURS=window_hours(start, end),
+        LONG_NOTE=note,
+    )
 
 
 def group(items, start, end, ledger, run_dir):
     prompt = group_prompt(start, end)
-    memory = "\n".join(f"{k}|{r['region']}|{r['date']}|{r['headline']}|{r.get('state', '')}"
-                       for k, r in sorted(ledger.items(), key=lambda kv: (kv[1]["region"], kv[1]["date"]), reverse=True))
-    body = (prompt + "\n## Already sent (last 7 days)\n" + (memory or "(none yet)") + "\n\n## Items\n"
-            + "\n".join(item_line(i, items, True) for i in range(len(items))) + "\n")
+    memory = "\n".join(
+        f"{k}|{r['region']}|{r['date']}|{r['headline']}|{r.get('state', '')}"
+        for k, r in sorted(ledger.items(), key=lambda kv: (kv[1]["region"], kv[1]["date"]), reverse=True)
+    )
+    body = (
+        prompt
+        + "\n## Already sent (last 7 days)\n"
+        + (memory or "(none yet)")
+        + "\n\n## Items\n"
+        + "\n".join(item_line(i, items, True) for i in range(len(items)))
+        + "\n"
+    )
     res = complete("group", body, "group", run_dir, 2 if is_long_window(start, end) else 1)
     return parse_json(res)["stories"]
 
@@ -547,8 +656,10 @@ def support(ids, items):
     news = news_ids(ids, items)
     trusted = [i for i in news if items[i]["tier"] == TRUSTED]
     if trusted:
-        if (all(MIXED in items[i]["flags"] for i in trusted)
-                and len({items[i]["group"] for i in news if items[i]["tier"] != LOW_QUALITY}) < 2):
+        if (
+            all(MIXED in items[i]["flags"] for i in trusted)
+            and len({items[i]["group"] for i in news if items[i]["tier"] != LOW_QUALITY}) < 2
+        ):
             return "uncorroborated", sorted({items[i]["outlet"] for i in trusted})
         return "trusted", []
     if any(items[i]["tier"] == COUNTERPOINT for i in news):
@@ -559,8 +670,10 @@ def support(ids, items):
 def pick_links(ids, items, cap):
     """Free first, Trusted first, one per outlet; never opinion; titles-only outlets last resort."""
     news = news_ids(ids, items)
-    usable = sorted([i for i in news if TITLES_ONLY not in items[i]["flags"]] or news,
-                    key=lambda i: (PAY_RANK[items[i]["pay"]], TIER_RANK[items[i]["tier"]]))
+    usable = sorted(
+        [i for i in news if TITLES_ONLY not in items[i]["flags"]] or news,
+        key=lambda i: (PAY_RANK[items[i]["pay"]], TIER_RANK[items[i]["tier"]]),
+    )
     out, seen = [], set()
     for i in usable:
         if items[i]["outlet"] not in seen:
@@ -588,12 +701,12 @@ def select(stories, items, threshold):
     for r in REGIONS:
         rs = sorted([s for s in kept if s["region"] == r], key=lambda s: (-s["final"], -s["base"], -s["n_outlets"]))
         lead = [s for s in rs if s["final"] >= 9]
-        main = lead[CAPS["lead"]:] + [s for s in rs if 7 <= s["final"] <= 8]
-        lead = lead[:CAPS["lead"]]
-        brief = main[CAPS["main"]:] + [s for s in rs if s["final"] <= 6]
-        main = main[:CAPS["main"]]
+        main = lead[CAPS["lead"] :] + [s for s in rs if 7 <= s["final"] <= 8]
+        lead = lead[: CAPS["lead"]]
+        brief = main[CAPS["main"] :] + [s for s in rs if s["final"] <= 6]
+        main = main[: CAPS["main"]]
         never_drop = [s for s in brief if s["final"] >= 9]
-        brief = never_drop + [s for s in brief if s["final"] < 9][:max(0, CAPS["brief"] - len(never_drop))]
+        brief = never_drop + [s for s in brief if s["final"] < 9][: max(0, CAPS["brief"] - len(never_drop))]
         for tier, grp in (("lead", lead), ("main", main), ("brief", brief)):
             for s in grp:
                 s["tier"] = tier
@@ -622,10 +735,14 @@ def writer_input(region, section, items, ledger, day, feedback=""):
         support_note = s["support"] + (f" — attribute to {', '.join(s['mixed_outlets'])}" if s["mixed_outlets"] else "")
         since, state = since_day(s, ledger, day)
         memory_note = f"continuing since {since} — readers know: {state}" if since else "new"
-        blocks.append(f"### Story {n} — {s['tier']} ({LIMITS[s['tier']]})\nWorking headline: {s['headline']}\n"
-                      f"SUPPORT: {support_note}\nMEMORY: {memory_note}\n"
-                      + "\n".join(item_line(i, items, False) for i in s["item_ids"]))
-    fix_note = "\n\nYour previous answer failed these checks — fix them:\n- " + "\n- ".join(feedback) if feedback else ""
+        blocks.append(
+            f"### Story {n} — {s['tier']} ({LIMITS[s['tier']]})\nWorking headline: {s['headline']}\n"
+            f"SUPPORT: {support_note}\nMEMORY: {memory_note}\n"
+            + "\n".join(item_line(i, items, False) for i in s["item_ids"])
+        )
+    fix_note = (
+        "\n\nYour previous answer failed these checks — fix them:\n- " + "\n- ".join(feedback) if feedback else ""
+    )
     return fill("prompt-write.md", REGION=region) + "\n" + "\n\n".join(blocks) + fix_note + "\n"
 
 
@@ -645,14 +762,22 @@ def validate(section, w, items):
         ids = set(s["item_ids"])
         x["counterpoint_ids"] = [as_id(v) for v in x.get("counterpoint_ids") or []]
         x["analysis"] = [dict(a, id=as_id(a.get("id"))) for a in x.get("analysis") or [] if isinstance(a, dict)]
-        bad = [v for v in x["counterpoint_ids"] + [a["id"] for a in x["analysis"]] if not isinstance(v, int) or v not in ids]
+        bad = [
+            v
+            for v in x["counterpoint_ids"] + [a["id"] for a in x["analysis"]]
+            if not isinstance(v, int) or v not in ids
+        ]
         if bad:
             errs.append(f"story {n}: ids {bad} are not integer ids of this story's items")
         if x.get("counterpoint"):
             n_counterpoints += 1
-            if not any(v in ids and items[v]["tier"] == COUNTERPOINT for v in x["counterpoint_ids"] if isinstance(v, int)):
+            if not any(
+                v in ids and items[v]["tier"] == COUNTERPOINT for v in x["counterpoint_ids"] if isinstance(v, int)
+            ):
                 errs.append(f"story {n}: counterpoint must cite a C item of this story")
-        if any(a["id"] in ids and OPINION not in items[a["id"]]["flags"] for a in x["analysis"] if isinstance(a["id"], int)):
+        if any(
+            a["id"] in ids and OPINION not in items[a["id"]]["flags"] for a in x["analysis"] if isinstance(a["id"], int)
+        ):
             errs.append(f"story {n}: analysis ids must be OP items")
         if any(OPINION in items[i]["flags"] for i in s["item_ids"]) and not x["analysis"]:
             errs.append(f"story {n}: has OP items but no analysis entry")
@@ -661,7 +786,9 @@ def validate(section, w, items):
         if s["tier"] != "brief" and not (x.get("summary") or x.get("bullets")):
             errs.append(f"story {n}: {s['tier']} needs a summary")
     if n_counterpoints > math.ceil(len(section) / 3):  # prompt: at most one story in three
-        errs.append(f"{n_counterpoints} counterpoints for {len(section)} stories — framing differences only, most stories null")
+        errs.append(
+            f"{n_counterpoints} counterpoints for {len(section)} stories — framing differences only, most stories null"
+        )
     return errs
 
 
@@ -670,8 +797,12 @@ def write_section(region, section, items, ledger, day, run_dir):
     feedback = []
     for attempt in (1, 2):
         try:
-            res = complete("write", writer_input(region, section, items, ledger, day, feedback),
-                           f"write-{region}-{attempt}", run_dir)
+            res = complete(
+                "write",
+                writer_input(region, section, items, ledger, day, feedback),
+                f"write-{region}-{attempt}",
+                run_dir,
+            )
             w = parse_json(res)
             feedback = validate(section, w, items)
         except Exception as e:  # noqa: BLE001
@@ -689,17 +820,52 @@ def gn_decode(gn_url):
     # checked 2026-10-09), hence this decode. If Google changes it, links fall back to GN redirects.
     art = urllib.parse.urlparse(gn_url).path.rsplit("/", 1)[-1]
     op = opener()
-    page = op.open(urllib.request.Request(f"https://news.google.com/rss/articles/{art}", headers={"User-Agent": UA}),
-                   timeout=20).read().decode("utf-8", "replace")
+    page = (
+        op.open(
+            urllib.request.Request(f"https://news.google.com/rss/articles/{art}", headers={"User-Agent": UA}),
+            timeout=20,
+        )
+        .read()
+        .decode("utf-8", "replace")
+    )
     sg = re.search(r'data-n-a-sg="([^"]+)"', page).group(1)
     ts = re.search(r'data-n-a-ts="([^"]+)"', page).group(1)
-    inner = json.dumps(["garturlreq", [["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1, None, None, None,
-                                        None, None, 0, 1], "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0, None, 0],
-                        art, int(ts), sg], separators=(",", ":"))
+    inner = json.dumps(
+        [
+            "garturlreq",
+            [
+                ["X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1, None, None, None, None, None, 0, 1],
+                "X",
+                "X",
+                1,
+                [1, 1, 1],
+                1,
+                1,
+                None,
+                0,
+                0,
+                None,
+                0,
+            ],
+            art,
+            int(ts),
+            sg,
+        ],
+        separators=(",", ":"),
+    )
     data = urllib.parse.urlencode({"f.req": json.dumps([[["Fbv4je", inner, None, "generic"]]], separators=(",", ":"))})
-    text = op.open(urllib.request.Request("https://news.google.com/_/DotsSplashUi/data/batchexecute", data=data.encode(),
-                                          headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"}),
-                   timeout=20).read().decode("utf-8", "replace")
+    text = (
+        op.open(
+            urllib.request.Request(
+                "https://news.google.com/_/DotsSplashUi/data/batchexecute",
+                data=data.encode(),
+                headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+            ),
+            timeout=20,
+        )
+        .read()
+        .decode("utf-8", "replace")
+    )
     for row in json.loads(text.split("\n", 1)[1]):
         if row[:2] == ["wrb.fr", "Fbv4je"] and row[2]:
             url = json.loads(row[2])[1]
@@ -759,13 +925,19 @@ def link_html(item, color=None):
 
 
 def story_links(s, items):
-    return ", ".join(("⚠&nbsp;" if items[i]["tier"] == LOW_QUALITY else "") + link_html(items[i], TIER_LINK_COLOR.get(items[i]["tier"]))
-                     + (" (paywall)" if items[i]["pay"] == "hard" else "") for i in s["link_ids"])
+    return ", ".join(
+        ("⚠&nbsp;" if items[i]["tier"] == LOW_QUALITY else "")
+        + link_html(items[i], TIER_LINK_COLOR.get(items[i]["tier"]))
+        + (" (paywall)" if items[i]["pay"] == "hard" else "")
+        for i in s["link_ids"]
+    )
 
 
 def analysis_html(s, items):
-    return "\n".join(f'<div style="{S_META}">Analysis: {link_html(items[x["id"]], MUTED)} {esc((x.get("gist") or "")[:1].lower() + (x.get("gist") or "")[1:])}</div>'
-                     for x in s.get("analysis") or [])
+    return "\n".join(
+        f'<div style="{S_META}">Analysis: {link_html(items[x["id"]], MUTED)} {esc((x.get("gist") or "")[:1].lower() + (x.get("gist") or "")[1:])}</div>'
+        for x in s.get("analysis") or []
+    )
 
 
 def story_label(s):
@@ -783,24 +955,37 @@ def counterpoint_html(s):
 def story_html(s, color, items):
     if s["tier"] == "brief":
         extra = "\n".join(x for x in [counterpoint_html(s), analysis_html(s, items)] if x)
-        return (f'<div style="margin:0 0 14px;">{story_label(s)}{esc(s["headline"])} <span style="{S_SMALL}">{story_links(s, items)}</span>'
-                + (f"\n{extra}" if extra else "") + "</div>")
+        return (
+            f'<div style="margin:0 0 14px;">{story_label(s)}{esc(s["headline"])} <span style="{S_SMALL}">{story_links(s, items)}</span>'
+            + (f"\n{extra}" if extra else "")
+            + "</div>"
+        )
     bullets = "".join(f"<li>{esc(b)}</li>" for b in s.get("bullets") or [])
     bullets = f'\n<ul style="margin:8px 0 0 20px;padding:0;">{bullets}</ul>' if bullets else ""
     lead = s["tier"] == "lead"
-    return "\n".join(x for x in [
-        f'<div style="{S_LEAD.format(c=color)}">' if lead else '<div style="margin:0 0 26px;">',
-        f'<p style="{S_H1 if lead else S_H2}">{story_label(s)}{esc(s["headline"])}</p>',
-        f'<div>{esc(s.get("summary"))}</div>{bullets}', counterpoint_html(s), f'<div style="{S_META}">{story_links(s, items)}</div>',
-        analysis_html(s, items), "</div>"] if x)
+    return "\n".join(
+        x
+        for x in [
+            f'<div style="{S_LEAD.format(c=color)}">' if lead else '<div style="margin:0 0 26px;">',
+            f'<p style="{S_H1 if lead else S_H2}">{story_label(s)}{esc(s["headline"])}</p>',
+            f"<div>{esc(s.get('summary'))}</div>{bullets}",
+            counterpoint_html(s),
+            f'<div style="{S_META}">{story_links(s, items)}</div>',
+            analysis_html(s, items),
+            "</div>",
+        ]
+        if x
+    )
 
 
 def section_html(name, stories, items, hours):
     c, n = RCOL[name], len(stories or [])
     count = f"{n} stor{'y' if n == 1 else 'ies'}" if n else ""
-    head = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:36px 0 20px;">'
-            f'<tr><td style="background:{c};padding:10px 16px;{SERIF}font-size:24px;font-weight:700;color:#ffffff;">{name}</td>'
-            f'<td align="right" style="background:{c};padding:10px 16px;{SANS}font-size:13px;color:#ffffff;">{count}</td></tr></table>')
+    head = (
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:36px 0 20px;">'
+        f'<tr><td style="background:{c};padding:10px 16px;{SERIF}font-size:24px;font-weight:700;color:#ffffff;">{name}</td>'
+        f'<td align="right" style="background:{c};padding:10px 16px;{SANS}font-size:13px;color:#ffffff;">{count}</td></tr></table>'
+    )
     if stories is None:
         return f'{head}\n<p style="margin:0;color:{MUTED};font-style:italic;">Couldn\'t build this section today.</p>'
     if not stories:
@@ -808,8 +993,12 @@ def section_html(name, stories, items, hours):
     out = [head] + [story_html(s, c, items) for s in stories if s["tier"] != "brief"]
     briefs = [story_html(s, c, items) for s in stories if s["tier"] == "brief"]
     if briefs:
-        out += [f'<p style="margin:30px 0 12px;padding-top:12px;border-top:2px solid {c};{SANS}font-size:15px;font-weight:700;color:{c};">In brief</p>',
-                '<div style="line-height:1.45;">', *briefs, "</div>"]
+        out += [
+            f'<p style="margin:30px 0 12px;padding-top:12px;border-top:2px solid {c};{SANS}font-size:15px;font-weight:700;color:{c};">In brief</p>',
+            '<div style="line-height:1.45;">',
+            *briefs,
+            "</div>",
+        ]
     return "\n".join(out)
 
 
@@ -819,9 +1008,17 @@ def render(sections, items, slot, start, skipped):
     ampm = f"{HOUR % 12 or 12}{'am' if HOUR < 12 else 'pm'}"
     hours = window_hours(start, slot)
     allst = [s for r in REGIONS for s in sections[r] or []]
-    words = sum(len((x or "").split()) for s in allst for x in [s["headline"], s.get("summary"), s.get("counterpoint"), *(s.get("bullets") or [])])
+    words = sum(
+        len((x or "").split())
+        for s in allst
+        for x in [s["headline"], s.get("summary"), s.get("counterpoint"), *(s.get("bullets") or [])]
+    )
     contents = ", ".join(f'<b style="color:{RCOL[r]};">{r}</b> {len(sections[r] or [])}' for r in REGIONS)
-    note = f"<br>{skipped} earlier day{'s' if skipped != 1 else ''} skipped (the Mac was off or asleep)." if skipped else ""
+    note = (
+        f"<br>{skipped} earlier day{'s' if skipped != 1 else ''} skipped (the Mac was off or asleep)."
+        if skipped
+        else ""
+    )
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Morning digest, {day}</title></head>
@@ -859,15 +1056,18 @@ def allowed_to():
 
 
 def smtp_password():
-    """$GMAIL_APP_PASSWORD, else the login Keychain's internet password for smtp.gmail.com / ADMIN."""
+    """$GMAIL_APP_PASSWORD, else the OS keyring (macOS Keychain, Windows Credential Locker, Secret Service)."""
     if pw := os.environ.get(SMTP_PASSWORD_ENV):
         return pw
-    r = subprocess.run(["security", "find-internet-password", "-s", SMTP_HOST, "-a", ADMIN, "-w"],
-                       capture_output=True, text=True, timeout=30)
-    if r.returncode or not r.stdout.strip():
-        raise RuntimeError(f"no Gmail app password: set ${SMTP_PASSWORD_ENV} or add a Keychain internet password "
-                           f"for server {SMTP_HOST}, account {ADMIN}")
-    return r.stdout.strip()
+    try:
+        pw = keyring.get_password(SMTP_HOST, ADMIN)
+    except keyring.errors.KeyringError:
+        pw = None
+    if not pw:
+        raise RuntimeError(
+            f"no Gmail app password: set ${SMTP_PASSWORD_ENV} or run `uv run keyring set {SMTP_HOST} {ADMIN}`"
+        )
+    return pw
 
 
 def send(subject, body, to, html=False):
@@ -893,8 +1093,11 @@ def send(subject, body, to, html=False):
 
 
 def notify(msg):
-    subprocess.run(["osascript", "-e", f"display notification {json.dumps(msg)} with title \"News digest\""],
-                   capture_output=True, timeout=30)
+    subprocess.run(
+        ["osascript", "-e", f'display notification {json.dumps(msg)} with title "News digest"'],
+        capture_output=True,
+        timeout=30,
+    )
 
 
 # ---------- run ----------
@@ -927,7 +1130,9 @@ def run_slot(slot, skipped, no_send):
 
     t1 = time.time()
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futs = {r: pool.submit(write_section, r, sections[r], items, ledger, day, run_dir) for r in REGIONS if sections[r]}
+        futs = {
+            r: pool.submit(write_section, r, sections[r], items, ledger, day, run_dir) for r in REGIONS if sections[r]
+        }
         drafts = {r: f.result() for r, f in futs.items()}
     slot_log["write_s"] = round(time.time() - t1, 1)
     written = {}
@@ -939,9 +1144,25 @@ def run_slot(slot, skipped, no_send):
         written[r] = []
         for n, s in enumerate(sections[r], 1):
             w = drafts[r][n]
-            written[r].append(dict(s, **{k: w.get(k) for k in ("headline", "short", "summary", "bullets", "counterpoint",
-                                                               "counterpoint_ids", "analysis", "state")},
-                                   since=since_day(s, ledger, day)[0]))
+            written[r].append(
+                dict(
+                    s,
+                    **{
+                        k: w.get(k)
+                        for k in (
+                            "headline",
+                            "short",
+                            "summary",
+                            "bullets",
+                            "counterpoint",
+                            "counterpoint_ids",
+                            "analysis",
+                            "state",
+                        )
+                    },
+                    since=since_day(s, ledger, day)[0],
+                )
+            )
     rendered = [s for r in REGIONS for s in written[r] or []]
     t1 = time.time()
     resolve_links([i for s in rendered for i in s["link_ids"] + [a["id"] for a in s.get("analysis") or []]], items)
@@ -954,8 +1175,10 @@ def run_slot(slot, skipped, no_send):
     slot_log["html_bytes"] = len(html.encode())
     if slot_log["html_bytes"] > 100_000:
         warn(f"{day}: HTML {slot_log['html_bytes']} bytes (Gmail clips >102KB)")
-    tops = [(written[r][0].get("short") or " ".join(written[r][0]["headline"].split()[:6])) for r in REGIONS if written[r]]
-    subject = ("[SHADOW] " if SHADOW else "") + " · ".join([short_date(slot.astimezone(TZ))] + tops)
+    tops = [
+        (written[r][0].get("short") or " ".join(written[r][0]["headline"].split()[:6])) for r in REGIONS if written[r]
+    ]
+    subject = ("[SHADOW] " if SHADOW else "") + " · ".join([short_date(slot.astimezone(TZ)), *tops])
     slot_log["subject"] = subject
     if no_send:
         slot_log["sent"] = False
@@ -973,11 +1196,25 @@ def run_slot(slot, skipped, no_send):
     # confirmed send → ledger, archive, state
     with LEDGER.open("a") as f:
         for s in rendered:
-            f.write(json.dumps({"date": day.isoformat(), "region": s["region"], "story": s.get("key"),
-                                **({"parents": s["parents"]} if s.get("parents") else {}),
-                                "headline": s["headline"], "state": s.get("state"), "tier": s["tier"],
-                                "base": s["base"], "final": s["final"], "reason": s.get("reason"),
-                                "links": [items[i]["url"] for i in s["link_ids"]]}, ensure_ascii=False) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "date": day.isoformat(),
+                        "region": s["region"],
+                        "story": s.get("key"),
+                        **({"parents": s["parents"]} if s.get("parents") else {}),
+                        "headline": s["headline"],
+                        "state": s.get("state"),
+                        "tier": s["tier"],
+                        "base": s["base"],
+                        "final": s["final"],
+                        "reason": s.get("reason"),
+                        "links": [items[i]["url"] for i in s["link_ids"]],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
     SENT.mkdir(exist_ok=True)
     (SENT / f"{day}.html").write_text(html)
     write_state(slot, message_id=slot_log["message_id"])
@@ -1000,7 +1237,7 @@ def run_due(no_send, final_attempt):
             run_slot(slot, skipped if n == 0 else 0, no_send)
         except SendUncertain:
             raise
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if not final_attempt or slot == slots[-1]:
                 raise
             # a catch-up day that fails twice must not block newer days
@@ -1016,7 +1253,7 @@ def text_email(subject, lines, tag):
 
 def main():
     LOGS.mkdir(exist_ok=True)
-    lock = open(LOGS / ".lock", "w")
+    lock = open(LOGS / ".lock", "w")  # noqa: SIM115 - held for the whole run
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -1030,7 +1267,7 @@ def main():
             try:
                 run_due(no_send, attempt == 2 or no_send)
                 break
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 RUN["errors"].append(traceback.format_exc())
                 print(traceback.format_exc(), file=sys.stderr)
                 if no_send:
@@ -1040,9 +1277,12 @@ def main():
                     time.sleep(900)
                     continue
                 notify(f"Digest failed: {e}"[:200])
-                head = ("The SMTP connection broke mid-send: the digest may or may not have arrived. "
-                        "The day is marked done so it won't be resent." if isinstance(e, SendUncertain)
-                        else f"Run {stamp} failed twice.")
+                head = (
+                    "The SMTP connection broke mid-send: the digest may or may not have arrived. "
+                    "The day is marked done so it won't be resent."
+                    if isinstance(e, SendUncertain)
+                    else f"Run {stamp} failed twice."
+                )
                 try:
                     text_email("[news-digest] FAILED", [head, "", RUN["errors"][-1]], f"failure-{stamp}")
                 except Exception as e2:  # noqa: BLE001
@@ -1051,10 +1291,16 @@ def main():
         sent = [s for s in RUN["slots"] if s.get("message_id")]
         if RUN["warnings"] and sent and not no_send:
             try:
-                text_email(f"[news-digest] health {date.today():%a %-d %b}: {len(RUN['warnings'])} warning(s)",
-                           RUN["warnings"] + ["", f"cost ${sum(c.get('cost_usd', 0) for c in RUN['calls']):.2f}, "
-                                              f"{round(time.time() - t0)}s, sent: {', '.join(s['message_id'] for s in sent)}"],
-                           f"health-{stamp}")
+                text_email(
+                    f"[news-digest] health {date.today():%a %-d %b}: {len(RUN['warnings'])} warning(s)",
+                    RUN["warnings"]
+                    + [
+                        "",
+                        f"cost ${sum(c.get('cost_usd', 0) for c in RUN['calls']):.2f}, "
+                        f"{round(time.time() - t0)}s, sent: {', '.join(s['message_id'] for s in sent)}",
+                    ],
+                    f"health-{stamp}",
+                )
             except Exception as e:  # noqa: BLE001
                 RUN["errors"].append(f"health email: {e}")
     finally:
@@ -1069,13 +1315,26 @@ def install():
     label, uid = "ai.newsdigest.daily", os.getuid()
     plist = Path.home() / f"Library/LaunchAgents/{label}.plist"
     LOGS.mkdir(exist_ok=True)
-    plist.write_bytes(plistlib.dumps({
-        "Label": label, "ProgramArguments": [sys.executable, str(APP / "digest.py")], "WorkingDirectory": str(APP),
-        "StartCalendarInterval": [{"Weekday": (d + 1) % 7, "Hour": HOUR, "Minute": 0} for d in sorted(SEND_DAYS)],
-        "RunAtLoad": True,
-        "EnvironmentVariables": {"PATH": os.environ["PATH"], "HOME": str(Path.home()),
-                                 "LANG": os.environ.get("LANG", "en_US.UTF-8")},
-        "StandardOutPath": str(LOGS / "launchd.out"), "StandardErrorPath": str(LOGS / "launchd.err")}))
+    plist.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": label,
+                "ProgramArguments": [sys.executable, str(APP / "digest.py")],
+                "WorkingDirectory": str(APP),
+                "StartCalendarInterval": [
+                    {"Weekday": (d + 1) % 7, "Hour": HOUR, "Minute": 0} for d in sorted(SEND_DAYS)
+                ],
+                "RunAtLoad": True,
+                "EnvironmentVariables": {
+                    "PATH": os.environ["PATH"],
+                    "HOME": str(Path.home()),
+                    "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+                },
+                "StandardOutPath": str(LOGS / "launchd.out"),
+                "StandardErrorPath": str(LOGS / "launchd.err"),
+            }
+        )
+    )
     subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
     for _ in range(5):  # bootstrap can fail briefly right after bootout
         if subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)]).returncode == 0:
