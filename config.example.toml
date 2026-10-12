@@ -9,11 +9,11 @@ recipients = ["you@gmail.com"]
 shadow = true                      # true: admin only, subject prefixed "[SHADOW] "
 
 [schedule]
-timezone = "Europe/London"        # should match the Mac's timezone (launchd fires in local time)
+timezone = "Europe/London"        # should match the computer's timezone (the scheduler fires in local time)
 tz_label = "UK time"           # shown in the email and prompts
 hour = 7
 send_days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri"]
-catchup_days = 3                   # max digests per run after the Mac was off; older days are skipped
+catchup_days = 3                   # max digests per run after the computer was off; older days are skipped
 
 [paths]
 # claude = "/path/to/claude"       # default: claude on PATH, else ~/.local/bin/claude

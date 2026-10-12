@@ -7,7 +7,11 @@ on:
 
 jobs:
   check:
-    runs-on: macos-latest  # launchd/osascript app; macOS runners are free for public repos
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7

@@ -2,10 +2,10 @@
 Model per stage is configurable ([llm.*]). Config: config.toml. Usage: digest.py [--no-send | --install]. Tests: uv run pytest"""
 
 import difflib
-import fcntl
 import json
 import math
 import os
+import platform
 import plistlib
 import re
 import shutil
@@ -30,10 +30,12 @@ from html import unescape
 from pathlib import Path
 from typing import Literal
 from xml.etree import ElementTree as ET
+from xml.sax.saxutils import escape as xml_escape
 from zoneinfo import ZoneInfo
 
 import keyring
 import keyring.errors
+import truststore
 from dotenv import load_dotenv
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -260,16 +262,8 @@ def is_long_window(start, end):
 # ---------- fetch ----------
 @cache
 def https():
-    """HTTPS handler trusting macOS system roots too: /etc/ssl/cert.pem lacks newer ones (ISRG Root X2)."""
-    ctx = ssl.create_default_context()
-    pem = subprocess.run(
-        ["security", "find-certificate", "-a", "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"],
-        capture_output=True,
-        text=True,
-    ).stdout
-    if pem:
-        ctx.load_verify_locations(cadata=pem)
-    return urllib.request.HTTPSHandler(context=ctx)
+    """HTTPS handler verifying against the OS trust store (bundled roots can lag, e.g. ISRG Root X2)."""
+    return urllib.request.HTTPSHandler(context=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
 
 
 def opener():
@@ -405,7 +399,7 @@ def fetch_feed(feed, start, end, when_h, scale, gn_locales):
 
 
 def fetch_all(start, end):
-    src = json.loads(SOURCES.read_text())
+    src = json.loads(SOURCES.read_text(encoding="utf-8"))
     feeds = src["feeds"]
     when_h = max(24, math.ceil((datetime.now(UTC) - start).total_seconds() / 3600))  # GN `when:` is relative to now
     scale = max(1, round((end - start).total_seconds() / 86400))
@@ -440,6 +434,14 @@ def fetch_all(start, end):
 
 
 # ---------- model calls ----------
+def kill_tree(p):
+    """Kill a process and its children (claude spawns helpers)."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+    else:
+        os.killpg(p.pid, signal.SIGKILL)  # start_new_session=True made it a group leader
+
+
 def claude(args, stdin, timeout, tag, run_dir, env=None):
     """claude -p with a hard timeout (kills the process group). Returns (result text, stats)."""
     cmd = [CLAUDE, "-p", "--output-format", "json", "--no-session-persistence", *args]
@@ -457,11 +459,11 @@ def claude(args, stdin, timeout, tag, run_dir, env=None):
     try:
         out, err = p.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
+        kill_tree(p)
         p.communicate()
         RUN["calls"].append({"tag": tag, "timeout": timeout})
         raise RuntimeError(f"{tag}: timed out after {timeout}s") from None
-    (run_dir / f"raw-{tag}.json").write_text(out + ("\n--- stderr ---\n" + err if err else ""))
+    (run_dir / f"raw-{tag}.json").write_text(out + ("\n--- stderr ---\n" + err if err else ""), encoding="utf-8")
     try:
         res = json.loads(out)
     except ValueError:
@@ -519,7 +521,7 @@ def openai_call(stage, prompt, tag, run_dir, scale=1):
         max_tokens=c["max_output_tokens"],
         **({"reasoning_effort": c["effort"]} if c["effort"] else {}),
     )
-    (run_dir / f"raw-{tag}.json").write_text(resp.model_dump_json(indent=1))
+    (run_dir / f"raw-{tag}.json").write_text(resp.model_dump_json(indent=1), encoding="utf-8")
     u = resp.usage
     RUN["calls"].append(
         {
@@ -549,7 +551,7 @@ def load_ledger(day):
     """Latest line per key from the 7 days before `day`."""
     lo, latest = (day - timedelta(days=7)).isoformat(), {}
     if LEDGER.exists():
-        for ln in LEDGER.read_text().splitlines():
+        for ln in LEDGER.read_text(encoding="utf-8").splitlines():
             r = json.loads(ln)
             if lo <= r["date"] < day.isoformat() and r["date"] >= latest.get(r["story"], {}).get("date", ""):
                 latest[r["story"]] = r
@@ -704,7 +706,7 @@ def since_day(s, ledger, day):
 
 
 def writer_input(region, section, items, ledger, day, feedback=()):
-    feeds = json.loads(SOURCES.read_text())["feeds"]
+    feeds = json.loads(SOURCES.read_text(encoding="utf-8"))["feeds"]
     stories = []
     for s in section:
         since, state = since_day(s, ledger, day)
@@ -961,16 +963,35 @@ def send(subject, body, to, html=False):
 
 
 def notify(msg):
-    subprocess.run(
-        ["osascript", "-e", f'display notification {json.dumps(msg)} with title "News digest"'],
-        capture_output=True,
-        timeout=30,
-    )
+    """Best-effort desktop notification; the failure email is the real alert."""
+    if sys.platform == "darwin":
+        cmd = ["osascript", "-e", f'display notification {json.dumps(msg)} with title "News digest"']
+    elif shutil.which("notify-send"):
+        cmd = ["notify-send", "News digest", msg]
+    else:
+        return  # ponytail: no Windows toast; add one if the failure email isn't enough
+    subprocess.run(cmd, capture_output=True, timeout=30)
+
+
+def try_lock(f):
+    """Non-blocking exclusive lock on an open file; False if another run holds it."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
 
 
 # ---------- run ----------
 def write_state(slot, **extra):
-    STATE.write_text(json.dumps({"last_sent": slot.isoformat(), **extra}) + "\n")
+    STATE.write_text(json.dumps({"last_sent": slot.isoformat(), **extra}) + "\n", encoding="utf-8")
 
 
 def run_slot(slot, skipped, no_send):
@@ -983,7 +1004,9 @@ def run_slot(slot, skipped, no_send):
 
     items, slot_log["feeds"] = fetch_all(start, end)
     slot_log["items"], slot_log["fetch_s"] = len(items), round(time.time() - t0, 1)
-    (run_dir / "items.jsonl").write_text("".join(json.dumps(i, ensure_ascii=False) + "\n" for i in items))
+    (run_dir / "items.jsonl").write_text(
+        "".join(json.dumps(i, ensure_ascii=False) + "\n" for i in items), encoding="utf-8"
+    )
     if not items:
         raise RuntimeError("0 items fetched (network down?)")
     if len(items) < 100:  # ponytail: fixed floor (1.2–1.5k is normal); upgrade: compare to recent runs' counts
@@ -1038,8 +1061,8 @@ def run_slot(slot, skipped, no_send):
 
     html = render(written, items, slot, start, skipped)
     path = run_dir / "digest.html"
-    path.write_text(html)
-    (run_dir / "digest.json").write_text(json.dumps(written, indent=1, ensure_ascii=False))
+    path.write_text(html, encoding="utf-8")
+    (run_dir / "digest.json").write_text(json.dumps(written, indent=1, ensure_ascii=False), encoding="utf-8")
     slot_log["html_bytes"] = len(html.encode())
     if slot_log["html_bytes"] > 100_000:
         warn(f"{day}: HTML {slot_log['html_bytes']} bytes (Gmail clips >102KB)")
@@ -1062,7 +1085,7 @@ def run_slot(slot, skipped, no_send):
         raise
     slot_log["send_s"] = round(time.time() - t1, 1)
     # confirmed send → ledger, archive, state
-    with LEDGER.open("a") as f:
+    with LEDGER.open("a", encoding="utf-8") as f:
         for s in rendered:
             f.write(
                 json.dumps(
@@ -1084,14 +1107,14 @@ def run_slot(slot, skipped, no_send):
                 + "\n"
             )
     SENT.mkdir(exist_ok=True)
-    (SENT / f"{day}.html").write_text(html)
+    (SENT / f"{day}.html").write_text(html, encoding="utf-8")
     write_state(slot, message_id=slot_log["message_id"])
     slot_log["total_s"] = round(time.time() - t0, 1)
     print(f"sent {day}: {slot_log['message_id']} ({slot_log['html_bytes']} bytes, {slot_log['total_s']}s)")
 
 
 def run_due(no_send, final_attempt):
-    last = json.loads(STATE.read_text())["last_sent"] if STATE.exists() else None
+    last = json.loads(STATE.read_text(encoding="utf-8"))["last_sent"] if STATE.exists() else None
     slots, skipped = due_slots(datetime.now(TZ), datetime.fromisoformat(last) if last else None)
     if not slots:
         RUN["note"] = f"nothing due (last sent {last})"
@@ -1115,16 +1138,14 @@ def run_due(no_send, final_attempt):
 
 def text_email(subject, lines, tag):
     body = "\n".join(lines) + "\n"
-    (LOGS / f"{tag}.txt").write_text(body)
+    (LOGS / f"{tag}.txt").write_text(body, encoding="utf-8")
     return send(subject, body, [ADMIN])  # ops mail: admin only, even when live
 
 
 def main():
     LOGS.mkdir(exist_ok=True)
-    lock = open(LOGS / ".lock", "w")  # noqa: SIM115 - held for the whole run
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    lock = open(LOGS / ".lock", "w", encoding="utf-8")  # noqa: SIM115 - held for the whole run
+    if not try_lock(lock):
         print("another run holds the lock; exiting")
         return
     no_send = "--no-send" in sys.argv
@@ -1160,7 +1181,7 @@ def main():
         if RUN["warnings"] and sent and not no_send:
             try:
                 text_email(
-                    f"[news-digest] health {date.today():%a %-d %b}: {len(RUN['warnings'])} warning(s)",
+                    f"[news-digest] health {short_date(date.today())}: {len(RUN['warnings'])} warning(s)",
                     RUN["warnings"]
                     + [
                         "",
@@ -1174,36 +1195,80 @@ def main():
     finally:
         RUN["wall_s"] = round(time.time() - t0, 1)
         RUN["cost_usd"] = round(sum(c.get("cost_usd", 0) for c in RUN["calls"]), 4)
-        (LOGS / f"run-{stamp}.json").write_text(json.dumps(RUN, indent=1, ensure_ascii=False))
+        (LOGS / f"run-{stamp}.json").write_text(json.dumps(RUN, indent=1, ensure_ascii=False), encoding="utf-8")
         print(f"log: logs/run-{stamp}.json cost ${RUN['cost_usd']} wall {RUN['wall_s']}s")
 
 
-def install():
-    """Write the LaunchAgent from config and (re)load it. launchd fires in the Mac's local time."""
-    label, uid = "ai.newsdigest.daily", os.getuid()
-    plist = Path.home() / f"Library/LaunchAgents/{label}.plist"
-    LOGS.mkdir(exist_ok=True)
-    plist.write_bytes(
-        plistlib.dumps(
-            {
-                "Label": label,
-                "ProgramArguments": [sys.executable, str(APP / "digest.py")],
-                "WorkingDirectory": str(APP),
-                "StartCalendarInterval": [
-                    {"Weekday": (d + 1) % 7, "Hour": HOUR, "Minute": 0} for d in sorted(SEND_DAYS)
-                ],
-                "RunAtLoad": True,
-                "EnvironmentVariables": {
-                    "PATH": os.environ["PATH"],
-                    "HOME": str(Path.home()),
-                    "LANG": os.environ.get("LANG", "en_US.UTF-8"),
-                },
-                "StandardOutPath": str(LOGS / "launchd.out"),
-                "StandardErrorPath": str(LOGS / "launchd.err"),
-            }
-        )
+# ---------- install (per-OS scheduler; fires in the computer's local time) ----------
+LABEL = "ai.newsdigest.daily"
+DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def launchd_plist():
+    return {
+        "Label": LABEL,
+        "ProgramArguments": [sys.executable, str(APP / "digest.py")],
+        "WorkingDirectory": str(APP),
+        "StartCalendarInterval": [{"Weekday": (d + 1) % 7, "Hour": HOUR, "Minute": 0} for d in sorted(SEND_DAYS)],
+        "RunAtLoad": True,
+        "EnvironmentVariables": {
+            "PATH": os.environ["PATH"],
+            "HOME": str(Path.home()),
+            "LANG": os.environ.get("LANG", "en_US.UTF-8"),
+        },
+        "StandardOutPath": str(LOGS / "launchd.out"),
+        "StandardErrorPath": str(LOGS / "launchd.err"),
+    }
+
+
+def systemd_units():
+    """(service, timer) for a systemd user timer; Persistent= runs a missed slot at next boot."""
+    days = ",".join(WEEKDAYS[d] for d in sorted(SEND_DAYS))
+    service = (
+        "[Unit]\nDescription=News digest\n\n[Service]\nType=oneshot\n"
+        f'WorkingDirectory={APP}\nExecStart="{sys.executable}" "{APP / "digest.py"}"\n'
     )
-    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{label}"], capture_output=True)
+    timer = (
+        "[Unit]\nDescription=News digest schedule\n\n[Timer]\n"
+        f"OnCalendar={days} *-*-* {HOUR:02d}:00:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"
+    )
+    return service, timer
+
+
+def task_xml():
+    """Task Scheduler definition: weekly on send days; StartWhenAvailable runs a missed slot when back on."""
+    pyw = Path(sys.executable).with_name("pythonw.exe")  # no console window
+    days = "".join(f"<{DAY_NAMES[d]}/>" for d in sorted(SEND_DAYS))
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>2026-01-01T{HOUR:02d}:00:00</StartBoundary>
+      <ScheduleByWeek><DaysOfWeek>{days}</DaysOfWeek><WeeksInterval>1</WeeksInterval></ScheduleByWeek>
+    </CalendarTrigger>
+  </Triggers>
+  <Settings>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT2H</ExecutionTimeLimit>
+  </Settings>
+  <Actions>
+    <Exec>
+      <Command>{xml_escape(str(pyw if pyw.exists() else sys.executable))}</Command>
+      <Arguments>{xml_escape(f'"{APP / "digest.py"}"')}</Arguments>
+      <WorkingDirectory>{xml_escape(str(APP))}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def install_launchd():
+    uid = os.getuid()
+    plist = Path.home() / f"Library/LaunchAgents/{LABEL}.plist"
+    plist.write_bytes(plistlib.dumps(launchd_plist()))
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}/{LABEL}"], capture_output=True)
     for _ in range(5):  # bootstrap can fail briefly right after bootout
         if subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist)]).returncode == 0:
             return print(f"installed and loaded {plist}")
@@ -1211,5 +1276,34 @@ def install():
     sys.exit(f"launchctl bootstrap failed for {plist}")
 
 
+def install_systemd():
+    unit_dir = Path.home() / ".config/systemd/user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    service, timer = systemd_units()
+    (unit_dir / f"{LABEL}.service").write_text(service, encoding="utf-8")
+    (unit_dir / f"{LABEL}.timer").write_text(timer, encoding="utf-8")
+    for cmd in (["daemon-reload"], ["enable", "--now", f"{LABEL}.timer"]):
+        subprocess.run(["systemctl", "--user", *cmd], check=True)
+    print(f"installed {unit_dir / LABEL}.timer (run `loginctl enable-linger` to fire while logged out)")
+
+
+def install_schtasks():
+    xml = LOGS / "task.xml"
+    xml.write_text(task_xml(), encoding="utf-16")
+    subprocess.run(["schtasks", "/Create", "/F", "/TN", LABEL, "/XML", str(xml)], check=True)
+    print(f"installed scheduled task {LABEL}")
+
+
+def install():
+    LOGS.mkdir(exist_ok=True)
+    installers = {"Darwin": install_launchd, "Linux": install_systemd, "Windows": install_schtasks}
+    if platform.system() not in installers:
+        sys.exit(f"--install: unsupported OS {platform.system()}; schedule `{sys.executable} digest.py` yourself")
+    installers[platform.system()]()
+
+
 if __name__ == "__main__":
+    for stream in (sys.stdout, sys.stderr):  # Windows consoles/log files may not be UTF-8
+        if stream:
+            stream.reconfigure(errors="replace")
     install() if "--install" in sys.argv else main()
