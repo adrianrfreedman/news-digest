@@ -1,0 +1,103 @@
+{#- Inline styles only: Gmail strips <style>. One element per line. -#}
+{%- set SERIF %}font-family:Charter,'Iowan Old Style',Georgia,serif;{% endset -%}
+{%- set SANS %}font-family:Helvetica,Arial,sans-serif;{% endset -%}
+{%- set S_META %}margin-top:6px;{{ SANS }}font-size:13px;color:{{ c.muted }};{% endset -%}
+{%- set S_CP %}margin:10px 0 0;padding:8px 12px;background:#f3eff8;{{ SANS }}font-size:14px;line-height:1.5;color:#4a3763;{% endset -%}
+
+{%- macro link(item, color=None) -%}
+<a href="{{ item.url }}"{% if color %} style="color:{{ color }};"{% endif %}>{{ item.outlet }}</a>
+{%- endmacro -%}
+
+{%- macro links(s) -%}
+{%- for i in s.link_ids -%}
+{%- set it = items[i] -%}
+{%- if it.tier == "LQ" %}⚠&nbsp;{% endif -%}
+{{ link(it, tier_link_color.get(it.tier)) }}
+{%- if it.pay == "hard" %} (paywall){% endif -%}
+{%- if not loop.last %}, {% endif -%}
+{%- endfor -%}
+{%- endmacro -%}
+
+{%- macro label(s) -%}
+{%- set tag, color, _ = support_label[s.support] -%}
+{%- if s.get("since") %}<span style="{{ SANS }}font-size:12px;font-weight:700;color:{{ c.muted }};">Since {{ s.since }}.</span> {% endif -%}
+{%- if tag %}<span style="{{ SANS }}font-size:12px;font-weight:700;color:{{ color }};">{{ tag.format(outlets=s.mixed_outlets | join(", ")) }}.</span> {% endif -%}
+{%- endmacro -%}
+
+{%- macro counterpoint(s) -%}
+{%- if s.get("counterpoint") %}<p style="{{ S_CP }}"><b>Counterpoint.</b> {{ s.counterpoint }}</p>{% endif -%}
+{%- endmacro -%}
+
+{%- macro analysis(s) -%}
+{%- for x in s.get("analysis") or [] -%}
+{%- set gist = x.get("gist") or "" -%}
+<div style="{{ S_META }}">Analysis: {{ link(items[x.id], c.muted) }} {{ gist[:1] | lower }}{{ gist[1:] }}</div>
+{%- if not loop.last %}{{ "\n" }}{% endif -%}
+{%- endfor -%}
+{%- endmacro -%}
+
+{%- macro brief(s) -%}
+<div style="margin:0 0 14px;">{{ label(s) }}{{ s.headline }} <span style="{{ SANS }}font-size:13px;color:{{ c.muted }};">{{ links(s) }}</span>
+{%- for x in [counterpoint(s), analysis(s)] if x %}{{ "\n" }}{{ x }}{% endfor -%}
+</div>
+{%- endmacro -%}
+
+{%- macro story(s, color) -%}
+{%- if s.tier == "lead" -%}
+<div style="margin:0 0 28px;padding:2px 0 2px 14px;border-left:4px solid {{ color }};font-size:17px;line-height:1.6;">
+<p style="margin:0 0 6px;font-size:22px;line-height:1.25;font-weight:700;">{{ label(s) }}{{ s.headline }}</p>
+{%- else -%}
+<div style="margin:0 0 26px;">
+<p style="margin:0 0 4px;font-size:18px;line-height:1.3;font-weight:700;">{{ label(s) }}{{ s.headline }}</p>
+{%- endif %}
+<div>{{ s.get("summary") or "" }}</div>
+{%- if s.get("bullets") %}{{ "\n" }}<ul style="margin:8px 0 0 20px;padding:0;">{% for b in s.bullets %}<li>{{ b }}</li>{% endfor %}</ul>{% endif -%}
+{%- for x in [counterpoint(s)] if x %}{{ "\n" }}{{ x }}{% endfor %}
+<div style="{{ S_META }}">{{ links(s) }}</div>
+{%- for x in [analysis(s)] if x %}{{ "\n" }}{{ x }}{% endfor %}
+</div>
+{%- endmacro -%}
+
+{%- macro section(sec) -%}
+{%- set col, stories = sec.color, sec.stories -%}
+{%- set n = (stories or []) | length -%}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:36px 0 20px;"><tr><td style="background:{{ col }};padding:10px 16px;{{ SERIF }}font-size:24px;font-weight:700;color:#ffffff;">{{ sec.name }}</td><td align="right" style="background:{{ col }};padding:10px 16px;{{ SANS }}font-size:13px;color:#ffffff;">{% if n %}{{ n }} stor{{ "y" if n == 1 else "ies" }}{% endif %}</td></tr></table>
+{%- if stories is none %}
+<p style="margin:0;color:{{ c.muted }};font-style:italic;">Couldn't build this section today.</p>
+{%- elif not stories %}
+<p style="margin:0;color:{{ c.muted }};font-style:italic;">Nothing major in the last {{ hours }}h.</p>
+{%- else -%}
+{%- for s in stories if s.tier != "brief" %}
+{{ story(s, col) }}
+{%- endfor -%}
+{%- set briefs = stories | selectattr("tier", "equalto", "brief") | list -%}
+{%- if briefs %}
+<p style="margin:30px 0 12px;padding-top:12px;border-top:2px solid {{ col }};{{ SANS }}font-size:15px;font-weight:700;color:{{ col }};">In brief</p>
+<div style="line-height:1.45;">
+{%- for s in briefs %}
+{{ brief(s) }}
+{%- endfor %}
+</div>
+{%- endif -%}
+{%- endif -%}
+{%- endmacro -%}
+
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Morning digest, {{ day }}</title></head>
+<body style="margin:0;padding:0;background:#ffffff;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;">
+<tr><td align="center" style="padding:24px 16px 32px;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;">
+<tr><td style="text-align:left;{{ SERIF }}font-size:16px;line-height:1.55;color:{{ c.ink }};">
+<p style="margin:0;{{ SANS }}font-size:14px;font-weight:700;color:{{ c.muted }};">Morning digest</p>
+<p style="margin:2px 0 8px;font-size:32px;line-height:1.15;font-weight:700;">{{ day }}</p>
+<p style="margin:0;{{ SANS }}font-size:14px;line-height:1.5;color:{{ c.muted }};">News from {{ ampm }} {{ start_day }} to {{ ampm }} {{ end_day }}, {{ tz_label }}.<br>{{ n_stories }} stories, about {{ minutes }} minutes: {% for sec in sections %}<b style="color:{{ sec.color }};">{{ sec.name }}</b> {{ (sec.stories or []) | length }}{% if not loop.last %}, {% endif %}{% endfor %}.{% if skipped %}<br>{{ skipped }} earlier day{{ "s" if skipped != 1 }} skipped (the Mac was off or asleep).{% endif %}</p>
+{% for sec in sections %}{{ section(sec) }}
+{% endfor %}<p style="margin:36px 0 0;padding-top:12px;border-top:1px solid #e3e5e8;{{ SANS }}font-size:12px;line-height:1.6;color:{{ c.muted }};">
+Blue links are trusted outlets. <span style="color:{{ c.plum }};">Plum</span> links and Counterpoint notes come from {{ counterpoint_desc }}.
+⚠ marks a low-quality source. Free links come first; "(paywall)" marks a hard paywall.
+Summaries are machine-written from feed headlines and snippets.{% if shadow %} Shadow mode.{% endif %}</p>
+</td></tr></table>
+</td></tr></table>
+</body></html>

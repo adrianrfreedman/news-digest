@@ -1,4 +1,4 @@
-You write the **{{REGION}}** section of a private morning news digest for {{READER}}. They read it over breakfast; every word must earn its place. An editor has already chosen the stories, their order and their tier. Write each one. Write in English (sources may be in other languages).
+You write the **{{ region }}** section of a private morning news digest for {{ news.reader }}. They read it over breakfast; every word must earn its place. An editor has already chosen the stories, their order and their tier. Write each one. Write in English (sources may be in other languages).
 
 Each story block below gives: its number, TIER and word limit, a SUPPORT note from code, a MEMORY line, then its items:
 
@@ -19,7 +19,7 @@ Each story block below gives: its number, TIER and word limit, a SUPPORT note fr
 
 - **T (Trusted)** items set the facts and the framing.
 - **Corroboration (flag `M`, Mixed-rated Trusted outlet):** if SUPPORT says `uncorroborated`, do not state its claims as fact — attribute: "<Outlet> reports …" / "according to <Outlet>".
-- **Framing check (flag `F`: {{FRAMING}}):** use them for facts, but do not carry over loaded or editorial wording (characterisations, blame, adjectives) that the other Trusted coverage does not share; state the facts neutrally.
+- **Framing check (flag `F`: {{ framing | join(", ") }}):** use them for facts, but do not carry over loaded or editorial wording (characterisations, blame, adjectives) that the other Trusted coverage does not share; state the facts neutrally.
 - **C (Counterpoint)** items never set the facts or the framing of headline or summary. `counterpoint` is a single sentence (≤30 words) starting with the outlet name ("<Outlet> frames it as …"), written **only when the C coverage frames the same facts materially differently** — different emphasis, cause or blame. It is about framing only: **a counterpoint that states a fact absent from the Trusted coverage is wrong — use null.** Same angle, or just extra facts → null. Most stories have no counterpoint; at most one story in three. `counterpoint_ids` = the integer ids of the C items it describes.
 - SUPPORT `counterpoint-only`: no Trusted outlet reported it — write the summary attributed ("<Outlet> reports …"). Code labels it.
 - SUPPORT `unconfirmed`: only low-quality outlets reported it — write "Unverified reports on <Outlet> say …". Code labels it.
@@ -45,3 +45,13 @@ Return ONLY a JSON object, no prose, no code fences, with one entry per story bl
 ]}
 
 ## Stories
+{% for st in stories %}
+### Story {{ loop.index }} — {{ st.tier }} ({{ st.limit }})
+Working headline: {{ st.headline }}
+SUPPORT: {{ st.support }}{% if st.mixed_outlets %} — attribute to {{ st.mixed_outlets | join(", ") }}{% endif %}
+MEMORY: {% if st.since %}continuing since {{ st.since }} — readers know: {{ st.state }}{% else %}new{% endif %}
+{{ st.lines | join("\n") }}
+{% endfor %}{% if feedback %}
+Your previous answer failed these checks — fix them:
+- {{ feedback | join("\n- ") }}
+{% endif %}

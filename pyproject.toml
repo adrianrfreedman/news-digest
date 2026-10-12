@@ -5,6 +5,7 @@ description = "Daily news digest emailed by headless Claude Code"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "jinja2>=3.1.6",
     "keyring>=25.7.0",
     "openai>=3.26.1",
     "pydantic-settings>=2.15.0",
