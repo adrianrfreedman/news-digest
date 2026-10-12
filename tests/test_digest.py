@@ -539,3 +539,115 @@ class TestSelect:
     def test_label_names_uncorroborated_outlets(self):
         s = {"support": "uncorroborated", "mixed_outlets": ["A", "B"], "since": "Thursday"}
         assert ">Since Thursday.<" in digest.story_label(s) and ">Reported by A, B.<" in digest.story_label(s)
+
+
+SNAP = APP / "tests" / "snapshots"
+SNAP_ITEMS = [
+    {
+        "tier": "T",
+        "flags": [],
+        "outlet": "BBC & Co",
+        "url": "https://b.test/1?a=1&b=2",
+        "pay": "",
+        "region_hint": "UK",
+        "published": "2026-10-11T06:10:00+00:00",
+        "title": 'PM says "no deal" <yet>',
+        "snippet": "Talks stall over fishing & energy",
+    },
+    {
+        "tier": "C",
+        "flags": [],
+        "outlet": "Plum Times",
+        "url": "https://p.test/2",
+        "pay": "hard",
+        "region_hint": "World",
+        "published": "2026-10-11T05:00:00+00:00",
+        "title": "Critics' view",
+        "snippet": "x",
+    },
+    {
+        "tier": "LQ",
+        "flags": [],
+        "outlet": "Tabloid",
+        "url": "https://t.test/3",
+        "pay": "",
+        "region_hint": "US",
+        "published": "2026-10-11T04:00:00+00:00",
+        "title": "Shock",
+        "snippet": "",
+    },
+    {
+        "tier": "T",
+        "flags": ["OP"],
+        "outlet": "Columnist",
+        "url": "https://o.test/4",
+        "pay": "soft",
+        "region_hint": "UK",
+        "published": "2026-10-10T22:00:00+00:00",
+        "title": "Why it matters",
+        "snippet": "op",
+    },
+]
+SNAP_LEAD = {
+    "tier": "lead",
+    "support": "trusted",
+    "mixed_outlets": [],
+    "since": "Friday",
+    "key": "rail-strike-talks",
+    "headline": 'Rail talks collapse after "final" offer',
+    "summary": "Unions & bosses <split> on pay.",
+    "bullets": ["Strike from Monday", "Services cut 60%"],
+    "counterpoint": "Plum Times calls it a 'lockout'.",
+    "analysis": [{"id": 3, "gist": "It shows the limits of mediation"}],
+    "link_ids": [0, 1, 2],
+    "item_ids": [0, 1, 2, 3],
+}
+SNAP_MAIN = {
+    "tier": "main",
+    "support": "uncorroborated",
+    "mixed_outlets": ["Tabloid"],
+    "since": None,
+    "headline": "Storm warning",
+    "summary": "Winds up to 90mph.",
+    "link_ids": [2],
+    "item_ids": [2],
+}
+SNAP_BRIEF = {
+    "tier": "brief",
+    "support": "counterpoint-only",
+    "mixed_outlets": [],
+    "headline": "Minor reshuffle",
+    "counterpoint": "Seen as a snub.",
+    "link_ids": [1],
+    "item_ids": [1],
+}
+
+
+class TestSnapshots:
+    """Rendered output for a fixed fixture; regenerate a file by deleting it and rerunning."""
+
+    def check(self, name, text):
+        path = SNAP / name
+        if not path.exists():
+            path.write_text(text)
+        assert text == path.read_text()
+
+    def test_email(self, monkeypatch):
+        sections = {"UK": [SNAP_LEAD, SNAP_MAIN, SNAP_BRIEF], "World": [], "US": None}
+        self.check("digest.html", digest.render(sections, SNAP_ITEMS, at(2026, 10, 12, 7), at(2026, 10, 9, 7), 1))
+
+    def test_group_prompt(self, monkeypatch):
+        monkeypatch.setattr(digest, "SOURCES", APP / "sources.example.json")
+        captured = {}
+        monkeypatch.setattr(
+            digest, "complete", lambda st, body, *a: captured.setdefault("body", body) and '{"stories": []}'
+        )
+        ledger = {"rail-strike-talks": {"region": "UK", "date": "2026-10-09", "headline": "Rail talks", "state": "s"}}
+        digest.group(SNAP_ITEMS, *window(at(2026, 10, 12, 7)), ledger, None)
+        self.check("prompt-group.txt", captured["body"])
+
+    def test_writer_prompt(self, monkeypatch):
+        monkeypatch.setattr(digest, "SOURCES", APP / "sources.example.json")
+        ledger = {"rail-strike-talks": {"date": "2026-10-09", "state": "talks ongoing"}}
+        text = digest.writer_input("UK", [SNAP_LEAD, SNAP_MAIN], SNAP_ITEMS, ledger, oct_day(12), ["bad id 9"])
+        self.check("prompt-write.txt", text)
