@@ -6,7 +6,7 @@ Morning email, one section per configured region, built from RSS feeds by `claud
 - `digest.py` — the whole run: lock → due slots → fetch → story grouping → per-region writers (guarded) → GN link decode → render → send → ledger. Model per stage is set in `[llm.*]` (defaults: Sonnet groups, Haiku writes).
 - `config.example.toml` — template for `config.toml`: recipients, shadow mode, schedule, model per stage (`[llm.group|write]`, defaults shown commented out: backend `claude-cli` or any OpenAI-compatible API via the `openai` SDK, model, effort, budget, timeout; API keys in git-ignored `.env`, see `.env.example`), reader, regions, scoring.
 - `sources.example.json` — template for `sources.json`: feeds per tier (T/C/LQ) and region.
-- `prompt-group.md`, `prompt-write.md` — prompt templates; `{{...}}` filled from config.
+- `templates/` — Jinja2 templates: `digest.html.j2` (the email, autoescaped, inline styles) and `prompt-group.md`, `prompt-write.md` (prompts, filled from config; an undefined variable raises). `tests/snapshots/` pins their rendered output; delete a file and rerun pytest to regenerate it.
 - Local, git-ignored: `config.toml`, `sources.json`, `state.json` (last sent slot), `stories.jsonl` (7-day story memory), `sent/`, `logs/`.
 
 ## Config

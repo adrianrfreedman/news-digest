@@ -26,7 +26,6 @@ from datetime import time as dtime
 from email.message import EmailMessage
 from email.utils import make_msgid, parsedate_to_datetime
 from functools import cache, partial
-from html import escape as _esc
 from html import unescape
 from pathlib import Path
 from typing import Literal
@@ -36,6 +35,7 @@ from zoneinfo import ZoneInfo
 import keyring
 import keyring.errors
 from dotenv import load_dotenv
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, TomlConfigSettingsSource
 
@@ -191,6 +191,12 @@ RCOL = {r.name: r.color for r in NEWS.regions}
 CATEGORIES = set(NEWS.categories)
 CAPS, LINK_CAP = NEWS.caps.model_dump(), NEWS.link_caps.model_dump()
 LIMITS = {"lead": "80–120 words", "main": "≤45 words", "brief": "headline only, ≤18 words"}
+TEMPLATES = Environment(  # email (autoescaped) and prompts
+    loader=FileSystemLoader(APP / "templates"),
+    autoescape=select_autoescape(["html.j2"]),
+    undefined=StrictUndefined,
+    keep_trailing_newline=True,
+)
 TRUSTED, COUNTERPOINT, LOW_QUALITY = "T", "C", "LQ"  # sources.json tiers
 OPINION, TITLES_ONLY, MIXED, FRAMING = "OP", "TO", "M", "F"  # sources.json flags
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
@@ -590,58 +596,26 @@ def item_line(i, items, trim):
 
 
 # ---------- prompts ----------
-def fill(name, **kw):
-    """Prompt template with {{KEY}}s filled from config + kw."""
-    feeds = json.loads(SOURCES.read_text())["feeds"]
-    kw = {
-        "READER": NEWS.reader,
-        "COUNTERPOINT_DESC": NEWS.counterpoint_desc,
-        "LOW_QUALITY_DESC": NEWS.low_quality_desc,
-        "PROXIMITY": NEWS.proximity,
-        "SIGNIFICANCE": NEWS.significance,
-        "KEY_EXAMPLES": NEWS.key_examples,
-        "SCORE_EXAMPLES": " ".join(NEWS.score_examples),
-        "CATEGORIES": ", ".join(NEWS.categories),
-        "REGION_ENUM": "|".join(REGIONS),
-        "REGION_RULES": "\n".join(f"- **{r.name}** — {r.rule}" for r in NEWS.regions),
-        "FRAMING": ", ".join(dict.fromkeys(f["outlet"] for f in feeds if FRAMING in f.get("flags", "").split())),
-        "TIME": f"{HOUR:02d}:00 {SETTINGS.schedule.tz_label}",
-        **kw,
-    }
-    text = (APP / name).read_text()
-    for k, v in kw.items():
-        text = text.replace("{{" + k + "}}", str(v))
-    return text
+def prompt(name, **kw):
+    """Render a prompt template; an undefined variable raises."""
+    return TEMPLATES.get_template(name).render(news=NEWS, time=f"{HOUR:02d}:00 {SETTINGS.schedule.tz_label}", **kw)
 
 
-def group_prompt(start, end):
-    names = [f"{d:%A}" for d in window_days(start, end)]
-    note = (
-        f"; {end.astimezone(TZ):%A} digest covering {', '.join(names[:-1])} and {names[-1]}" if len(names) > 1 else ""
-    )
-    return fill(
+def group_prompt(start, end, items, ledger):
+    return prompt(
         "prompt-group.md",
-        WINDOW_START=start.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
-        WINDOW_END=end.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
-        HOURS=window_hours(start, end),
-        LONG_NOTE=note,
+        window_start=start.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
+        window_end=end.astimezone(TZ).strftime("%a %Y-%m-%d %H:%M"),
+        hours=window_hours(start, end),
+        days=[f"{d:%A}" for d in window_days(start, end)],
+        end_day=f"{end.astimezone(TZ):%A}",
+        memory=sorted(ledger.items(), key=lambda kv: (kv[1]["region"], kv[1]["date"]), reverse=True),
+        lines=[item_line(i, items, True) for i in range(len(items))],
     )
 
 
 def group(items, start, end, ledger, run_dir):
-    prompt = group_prompt(start, end)
-    memory = "\n".join(
-        f"{k}|{r['region']}|{r['date']}|{r['headline']}|{r.get('state', '')}"
-        for k, r in sorted(ledger.items(), key=lambda kv: (kv[1]["region"], kv[1]["date"]), reverse=True)
-    )
-    body = (
-        prompt
-        + "\n## Already sent (last 7 days)\n"
-        + (memory or "(none yet)")
-        + "\n\n## Items\n"
-        + "\n".join(item_line(i, items, True) for i in range(len(items)))
-        + "\n"
-    )
+    body = group_prompt(start, end, items, ledger)
     res = complete("group", body, "group", run_dir, 2 if is_long_window(start, end) else 1)
     return parse_json(res)["stories"]
 
@@ -729,21 +703,22 @@ def since_day(s, ledger, day):
     return (short_date(seen) if (day - seen).days >= 6 else f"{seen:%A}"), prev.get("state", "")
 
 
-def writer_input(region, section, items, ledger, day, feedback=""):
-    blocks = []
-    for n, s in enumerate(section, 1):
-        support_note = s["support"] + (f" — attribute to {', '.join(s['mixed_outlets'])}" if s["mixed_outlets"] else "")
+def writer_input(region, section, items, ledger, day, feedback=()):
+    feeds = json.loads(SOURCES.read_text())["feeds"]
+    stories = []
+    for s in section:
         since, state = since_day(s, ledger, day)
-        memory_note = f"continuing since {since} — readers know: {state}" if since else "new"
-        blocks.append(
-            f"### Story {n} — {s['tier']} ({LIMITS[s['tier']]})\nWorking headline: {s['headline']}\n"
-            f"SUPPORT: {support_note}\nMEMORY: {memory_note}\n"
-            + "\n".join(item_line(i, items, False) for i in s["item_ids"])
+        stories.append(
+            {
+                **{k: s[k] for k in ("tier", "headline", "support", "mixed_outlets")},
+                "limit": LIMITS[s["tier"]],
+                "since": since,
+                "state": state,
+                "lines": [item_line(i, items, False) for i in s["item_ids"]],
+            }
         )
-    fix_note = (
-        "\n\nYour previous answer failed these checks — fix them:\n- " + "\n- ".join(feedback) if feedback else ""
-    )
-    return fill("prompt-write.md", REGION=region) + "\n" + "\n\n".join(blocks) + fix_note + "\n"
+    framing = dict.fromkeys(f["outlet"] for f in feeds if FRAMING in f.get("flags", "").split())
+    return prompt("prompt-write.md", region=region, framing=framing, stories=stories, feedback=feedback)
 
 
 def as_id(v):
@@ -892,18 +867,9 @@ def resolve_links(ids, items):
         warn(f"GN link decode failed {len(fails)}/{len(gn)}: {', '.join(fails[:5])}")
 
 
-# ---------- render (inline styles, since Gmail strips <style>; one element per line) ----------
+# ---------- render (templates/digest.html.j2) ----------
 INK, MUTED = "#1c1e21", "#5f6670"
 PLUM, GREY, AMBER = "#6d4c8d", "#8a9099", "#a15c07"
-SERIF = "font-family:Charter,'Iowan Old Style',Georgia,serif;"
-SANS = "font-family:Helvetica,Arial,sans-serif;"
-S_LEAD = "margin:0 0 28px;padding:2px 0 2px 14px;border-left:4px solid {c};font-size:17px;line-height:1.6;"
-S_H1 = "margin:0 0 6px;font-size:22px;line-height:1.25;font-weight:700;"
-S_H2 = "margin:0 0 4px;font-size:18px;line-height:1.3;font-weight:700;"
-S_META = f"margin-top:6px;{SANS}font-size:13px;color:{MUTED};"
-S_CP = f"margin:10px 0 0;padding:8px 12px;background:#f3eff8;{SANS}font-size:14px;line-height:1.5;color:#4a3763;"
-S_SMALL = f"{SANS}font-size:13px;color:{MUTED};"
-S_TAG = SANS + "font-size:12px;font-weight:700;color:{c};"
 TIER_LINK_COLOR = {COUNTERPOINT: PLUM, LOW_QUALITY: GREY}
 # support class → (tag before the headline, tag colour, min final score to keep); {outlets} = mixed_outlets
 SUPPORT_LABEL = {
@@ -915,130 +881,32 @@ SUPPORT_LABEL = {
 }
 
 
-def esc(t):
-    return _esc(t or "", quote=False)
-
-
-def link_html(item, color=None):
-    style = f' style="color:{color};"' if color else ""
-    return f'<a href="{_esc(item["url"])}"{style}>{esc(item["outlet"])}</a>'
-
-
-def story_links(s, items):
-    return ", ".join(
-        ("⚠&nbsp;" if items[i]["tier"] == LOW_QUALITY else "")
-        + link_html(items[i], TIER_LINK_COLOR.get(items[i]["tier"]))
-        + (" (paywall)" if items[i]["pay"] == "hard" else "")
-        for i in s["link_ids"]
-    )
-
-
-def analysis_html(s, items):
-    return "\n".join(
-        f'<div style="{S_META}">Analysis: {link_html(items[x["id"]], MUTED)} {esc((x.get("gist") or "")[:1].lower() + (x.get("gist") or "")[1:])}</div>'
-        for x in s.get("analysis") or []
-    )
-
-
-def story_label(s):
-    tag, color, _ = SUPPORT_LABEL[s["support"]]
-    tags = [(f"Since {s['since']}", MUTED)] if s.get("since") else []
-    if tag:
-        tags.append((tag.format(outlets=", ".join(s["mixed_outlets"])), color))
-    return "".join(f'<span style="{S_TAG.format(c=c)}">{esc(t)}.</span> ' for t, c in tags)
-
-
-def counterpoint_html(s):
-    return f'<p style="{S_CP}"><b>Counterpoint.</b> {esc(s["counterpoint"])}</p>' if s.get("counterpoint") else ""
-
-
-def story_html(s, color, items):
-    if s["tier"] == "brief":
-        extra = "\n".join(x for x in [counterpoint_html(s), analysis_html(s, items)] if x)
-        return (
-            f'<div style="margin:0 0 14px;">{story_label(s)}{esc(s["headline"])} <span style="{S_SMALL}">{story_links(s, items)}</span>'
-            + (f"\n{extra}" if extra else "")
-            + "</div>"
-        )
-    bullets = "".join(f"<li>{esc(b)}</li>" for b in s.get("bullets") or [])
-    bullets = f'\n<ul style="margin:8px 0 0 20px;padding:0;">{bullets}</ul>' if bullets else ""
-    lead = s["tier"] == "lead"
-    return "\n".join(
-        x
-        for x in [
-            f'<div style="{S_LEAD.format(c=color)}">' if lead else '<div style="margin:0 0 26px;">',
-            f'<p style="{S_H1 if lead else S_H2}">{story_label(s)}{esc(s["headline"])}</p>',
-            f"<div>{esc(s.get('summary'))}</div>{bullets}",
-            counterpoint_html(s),
-            f'<div style="{S_META}">{story_links(s, items)}</div>',
-            analysis_html(s, items),
-            "</div>",
-        ]
-        if x
-    )
-
-
-def section_html(name, stories, items, hours):
-    c, n = RCOL[name], len(stories or [])
-    count = f"{n} stor{'y' if n == 1 else 'ies'}" if n else ""
-    head = (
-        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:36px 0 20px;">'
-        f'<tr><td style="background:{c};padding:10px 16px;{SERIF}font-size:24px;font-weight:700;color:#ffffff;">{name}</td>'
-        f'<td align="right" style="background:{c};padding:10px 16px;{SANS}font-size:13px;color:#ffffff;">{count}</td></tr></table>'
-    )
-    if stories is None:
-        return f'{head}\n<p style="margin:0;color:{MUTED};font-style:italic;">Couldn\'t build this section today.</p>'
-    if not stories:
-        return f'{head}\n<p style="margin:0;color:{MUTED};font-style:italic;">Nothing major in the last {hours}h.</p>'
-    out = [head] + [story_html(s, c, items) for s in stories if s["tier"] != "brief"]
-    briefs = [story_html(s, c, items) for s in stories if s["tier"] == "brief"]
-    if briefs:
-        out += [
-            f'<p style="margin:30px 0 12px;padding-top:12px;border-top:2px solid {c};{SANS}font-size:15px;font-weight:700;color:{c};">In brief</p>',
-            '<div style="line-height:1.45;">',
-            *briefs,
-            "</div>",
-        ]
-    return "\n".join(out)
-
-
 def render(sections, items, slot, start, skipped):
     local, st = slot.astimezone(TZ), start.astimezone(TZ)
-    day = f"{local:%A} {local.day} {local:%B}"
-    ampm = f"{HOUR % 12 or 12}{'am' if HOUR < 12 else 'pm'}"
-    hours = window_hours(start, slot)
     allst = [s for r in REGIONS for s in sections[r] or []]
     words = sum(
         len((x or "").split())
         for s in allst
         for x in [s["headline"], s.get("summary"), s.get("counterpoint"), *(s.get("bullets") or [])]
     )
-    contents = ", ".join(f'<b style="color:{RCOL[r]};">{r}</b> {len(sections[r] or [])}' for r in REGIONS)
-    note = (
-        f"<br>{skipped} earlier day{'s' if skipped != 1 else ''} skipped (the Mac was off or asleep)."
-        if skipped
-        else ""
+    return TEMPLATES.get_template("digest.html.j2").render(
+        c={"ink": INK, "muted": MUTED, "plum": PLUM},
+        items=items,
+        support_label=SUPPORT_LABEL,
+        tier_link_color=TIER_LINK_COLOR,
+        sections=[{"name": r, "color": RCOL[r], "stories": sections[r]} for r in REGIONS],
+        day=f"{local:%A} {local.day} {local:%B}",
+        ampm=f"{HOUR % 12 or 12}{'am' if HOUR < 12 else 'pm'}",
+        start_day=f"{st:%A}",
+        end_day=f"{local:%A}",
+        tz_label=SETTINGS.schedule.tz_label,
+        n_stories=len(allst),
+        minutes=max(1, round(words / 238)),
+        skipped=skipped,
+        hours=window_hours(start, slot),
+        counterpoint_desc=NEWS.counterpoint_desc,
+        shadow=SHADOW,
     )
-    return f"""<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Morning digest, {day}</title></head>
-<body style="margin:0;padding:0;background:#ffffff;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;">
-<tr><td align="center" style="padding:24px 16px 32px;">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:600px;">
-<tr><td style="text-align:left;{SERIF}font-size:16px;line-height:1.55;color:{INK};">
-<p style="margin:0;{SANS}font-size:14px;font-weight:700;color:{MUTED};">Morning digest</p>
-<p style="margin:2px 0 8px;font-size:32px;line-height:1.15;font-weight:700;">{day}</p>
-<p style="margin:0;{SANS}font-size:14px;line-height:1.5;color:{MUTED};">News from {ampm} {st:%A} to {ampm} {local:%A}, {SETTINGS.schedule.tz_label}.<br>{len(allst)} stories, about {max(1, round(words / 238))} minutes: {contents}.{note}</p>
-{chr(10).join(section_html(r, sections[r], items, hours) for r in REGIONS)}
-<p style="margin:36px 0 0;padding-top:12px;border-top:1px solid #e3e5e8;{SANS}font-size:12px;line-height:1.6;color:{MUTED};">
-Blue links are trusted outlets. <span style="color:{PLUM};">Plum</span> links and Counterpoint notes come from {NEWS.counterpoint_desc}.
-⚠ marks a low-quality source. Free links come first; "(paywall)" marks a hard paywall.
-Summaries are machine-written from feed headlines and snippets.{" Shadow mode." if SHADOW else ""}</p>
-</td></tr></table>
-</td></tr></table>
-</body></html>
-"""
 
 
 # ---------- send ----------

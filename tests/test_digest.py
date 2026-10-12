@@ -7,6 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import ClassVar
 
+import jinja2
 import pytest
 from pydantic import ValidationError
 
@@ -247,22 +248,33 @@ class TestPrompts:
         monkeypatch.setattr(digest, "SOURCES", APP / "sources.example.json")
 
     def test_group_prompt_fully_filled(self):
-        p = digest.group_prompt(*window(at(2026, 10, 11, 7)))
-        assert not re.findall(r"\{\{\w+\}\}", p)
+        p = digest.group_prompt(*window(at(2026, 10, 11, 7)), [], {})
         assert "48h ending 07:00" in p and "Sunday digest covering Friday and Saturday" in p
         assert '"region": "' + "|".join(digest.REGIONS) + '"' in p
 
     def test_tier_descriptions_come_from_config(self):
-        p = digest.group_prompt(*window(at(2026, 10, 8, 7)))
+        p = digest.group_prompt(*window(at(2026, 10, 8, 7)), [], {})
         assert f"Counterpoint: {digest.NEWS.counterpoint_desc};" in p and digest.NEWS.low_quality_desc in p
 
     def test_weekday_group_prompt_has_no_long_note(self):
-        assert "covering" not in digest.group_prompt(*window(at(2026, 10, 8, 7)))
+        assert "covering" not in digest.group_prompt(*window(at(2026, 10, 8, 7)), [], {})
 
     def test_writer_prompt_fully_filled(self):
         p = digest.writer_input("World", [], [], {}, oct_day(9))
-        assert not re.findall(r"\{\{\w+\}\}", p)
         assert "flag `F`: " in p and "**World**" in p
+
+    def test_undefined_variable_raises(self):
+        with pytest.raises(jinja2.UndefinedError, match="region"):
+            digest.prompt("prompt-write.md", framing=[], stories=[], feedback=[])
+
+    def test_email_escapes_text(self):
+        item = {"tier": "T", "flags": [], "outlet": "<b>X</b>", "url": "https://x.test/?a=1&b=2", "pay": ""}
+        story = {"tier": "main", "support": "trusted", "mixed_outlets": [], "headline": "<script>", "link_ids": [0]}
+        html = digest.render(
+            {"UK": [story], "World": [], "US": []}, [item], at(2026, 10, 12, 7), at(2026, 10, 11, 7), 0
+        )
+        assert "<script>" not in html and "&lt;script&gt;" in html and "&lt;b&gt;X&lt;/b&gt;" in html
+        assert 'href="https://x.test/?a=1&amp;b=2"' in html
 
 
 ITEMS = [{"tier": "T", "flags": []}, {"tier": "C", "flags": []}, {"tier": "T", "flags": ["OP"]}]
@@ -535,10 +547,6 @@ class TestSelect:
         items = [dict(it, outlet="X", group="X", pay="") for it in items]
         out = digest.select([{"region": "World", "base": base, "item_ids": [0]}], items, 6)
         assert bool(out["World"]) == kept
-
-    def test_label_names_uncorroborated_outlets(self):
-        s = {"support": "uncorroborated", "mixed_outlets": ["A", "B"], "since": "Thursday"}
-        assert ">Since Thursday.<" in digest.story_label(s) and ">Reported by A, B.<" in digest.story_label(s)
 
 
 SNAP = APP / "tests" / "snapshots"
