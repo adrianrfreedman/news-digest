@@ -984,6 +984,7 @@ def try_lock(f):
         if os.name == "nt":
             import msvcrt
 
+            f.seek(0)  # locking covers bytes from the current position
             msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
@@ -1149,7 +1150,7 @@ def text_email(subject, lines, tag):
 
 def main():
     LOGS.mkdir(exist_ok=True)
-    lock = open(LOGS / ".lock", "w", encoding="utf-8")  # noqa: SIM115 - held for the whole run
+    lock = open(LOGS / ".lock", "a", encoding="utf-8")  # noqa: SIM115 - held for the whole run; "a": never truncate
     if not try_lock(lock):
         print("another run holds the lock; exiting")
         return
@@ -1248,7 +1249,7 @@ def task_xml():
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <Triggers>
     <CalendarTrigger>
-      <StartBoundary>2026-01-01T{HOUR:02d}:00:00</StartBoundary>
+      <StartBoundary>{date.today()}T{HOUR:02d}:00:00</StartBoundary>
       <ScheduleByWeek><DaysOfWeek>{days}</DaysOfWeek><WeeksInterval>1</WeeksInterval></ScheduleByWeek>
     </CalendarTrigger>
   </Triggers>

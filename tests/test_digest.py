@@ -682,7 +682,7 @@ class TestPlatform:
         assert [d["Weekday"] for d in digest.launchd_plist()["StartCalendarInterval"]] == [1, 2, 3, 4, 5, 0]
 
     def test_second_lock_is_refused(self, tmp_path):
-        with open(tmp_path / "l", "w", encoding="utf-8") as a, open(tmp_path / "l", "w", encoding="utf-8") as b:
+        with open(tmp_path / "l", "a", encoding="utf-8") as a, open(tmp_path / "l", "a", encoding="utf-8") as b:
             assert digest.try_lock(a) and not digest.try_lock(b)
 
     @pytest.mark.skipif(not shutil.which("systemd-analyze"), reason="needs systemd")
