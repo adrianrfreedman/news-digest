@@ -23,7 +23,7 @@ Morning email, one section per configured region, built from RSS feeds by `claud
 | Linux | systemd user timer `~/.config/systemd/user/ai.newsdigest.daily.timer` | `Persistent=true` (next boot); `loginctl enable-linger` to run while logged out | `systemctl --user list-timers ai.newsdigest.daily.timer` | `systemctl --user disable --now ai.newsdigest.daily.timer` |
 | Windows | Task Scheduler task `ai.newsdigest.daily` (runs `pythonw`, no console) | `StartWhenAvailable` | `schtasks /Query /TN ai.newsdigest.daily` | `schtasks /Delete /TN ai.newsdigest.daily /F` |
 
-On a headless Linux box without Secret Service, put the Gmail password in `.env` instead of the keyring.
+The keyring is only reachable inside a logged-in session. If the machine must send while nobody is logged in (Linux after a reboot, a Windows task set to run logged out, a headless box), put the Gmail password in `.env` as `GMAIL_APP_PASSWORD` instead.
 
 ## Run
 - `uv run pytest` — slots/windows, config, prompts, writer guards, SMTP send (uses the example config).

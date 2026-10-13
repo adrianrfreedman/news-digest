@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import date, datetime
@@ -683,6 +684,38 @@ class TestPlatform:
     def test_second_lock_is_refused(self, tmp_path):
         with open(tmp_path / "l", "w", encoding="utf-8") as a, open(tmp_path / "l", "w", encoding="utf-8") as b:
             assert digest.try_lock(a) and not digest.try_lock(b)
+
+    @pytest.mark.skipif(not shutil.which("systemd-analyze"), reason="needs systemd")
+    def test_systemd_accepts_units(self, tmp_path):
+        service, timer = digest.systemd_units()
+        spec = re.search(r"OnCalendar=(.*)", timer).group(1)
+        r = subprocess.run(["systemd-analyze", "calendar", spec], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        (tmp_path / "nd.service").write_text(service, encoding="utf-8")
+        (tmp_path / "nd.timer").write_text(timer.replace("[Timer]", "[Timer]\nUnit=nd.service"), encoding="utf-8")
+        r = subprocess.run(
+            ["systemd-analyze", "verify", str(tmp_path / "nd.service"), str(tmp_path / "nd.timer")],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+
+    @pytest.mark.skipif(sys.platform != "win32" or not os.environ.get("CI"), reason="registers a real task; CI only")
+    def test_task_scheduler_accepts_xml(self, tmp_path):
+        xml, name = tmp_path / "t.xml", "news-digest-ci-test"
+        xml.write_text(digest.task_xml(), encoding="utf-16")
+        r = subprocess.run(["schtasks", "/Create", "/F", "/TN", name, "/XML", str(xml)], capture_output=True, text=True)
+        try:
+            assert r.returncode == 0, r.stdout + r.stderr
+            q = subprocess.run(["schtasks", "/Query", "/TN", name, "/XML"], capture_output=True, text=True)
+            assert "pythonw.exe</Command>" in q.stdout, q.stdout
+        finally:
+            subprocess.run(["schtasks", "/Delete", "/F", "/TN", name], capture_output=True)
+
+    def test_kill_tree_tolerates_exited_process(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        p.wait()
+        digest.kill_tree(p)
 
     def test_kill_tree_stops_process(self):
         p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)

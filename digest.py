@@ -1,6 +1,7 @@
 """Daily news digest: RSS fetch → story grouping → per-region writers → HTML → Gmail SMTP send.
 Model per stage is configurable ([llm.*]). Config: config.toml. Usage: digest.py [--no-send | --install]. Tests: uv run pytest"""
 
+import contextlib
 import difflib
 import json
 import math
@@ -435,11 +436,14 @@ def fetch_all(start, end):
 
 # ---------- model calls ----------
 def kill_tree(p):
-    """Kill a process and its children (claude spawns helpers)."""
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
-    else:
-        os.killpg(p.pid, signal.SIGKILL)  # start_new_session=True made it a group leader
+    """Kill a process and its children (claude spawns helpers); then the process itself as a fallback."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError):  # already gone, or taskkill failed
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True, timeout=30)
+        else:
+            os.killpg(p.pid, signal.SIGKILL)  # start_new_session=True made it a group leader
+    with contextlib.suppress(OSError):
+        p.kill()
 
 
 def claude(args, stdin, timeout, tag, run_dir, env=None):
@@ -460,7 +464,8 @@ def claude(args, stdin, timeout, tag, run_dir, env=None):
         out, err = p.communicate(stdin, timeout=timeout)
     except subprocess.TimeoutExpired:
         kill_tree(p)
-        p.communicate()
+        with contextlib.suppress(subprocess.TimeoutExpired):  # a surviving grandchild can hold the pipes open
+            p.communicate(timeout=30)
         RUN["calls"].append({"tag": tag, "timeout": timeout})
         raise RuntimeError(f"{tag}: timed out after {timeout}s") from None
     (run_dir / f"raw-{tag}.json").write_text(out + ("\n--- stderr ---\n" + err if err else ""), encoding="utf-8")
