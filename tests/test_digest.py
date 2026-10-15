@@ -1,11 +1,13 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import ClassVar
+from xml.etree import ElementTree as ET
 
 import jinja2
 import pytest
@@ -121,12 +123,12 @@ class TestLlmConfig:
 class TestSettings:
     def load(self, monkeypatch, tmp_path, *subs, path=APP / "config.example.toml"):
         """Settings from `path` with (regex, replacement) substitutions applied."""
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for pat, rep in subs:
             text, n = re.subn(pat, rep, text)
             assert n, pat
         cfg = tmp_path / "c.toml"
-        cfg.write_text(text)
+        cfg.write_text(text, encoding="utf-8")
         monkeypatch.setattr(digest, "CONFIG", cfg)
         return digest.Settings()
 
@@ -487,7 +489,8 @@ class TestFetch:
                     "gn_locales": {},
                     "feeds": [{"outlet": "X", "tier": "T", "region": "World", "url": "https://x.test/feed"}],
                 }
-            )
+            ),
+            encoding="utf-8",
         )
         monkeypatch.setattr(digest, "SOURCES", src)
         monkeypatch.setattr(digest, "http_get", lambda url, timeout=30: body)
@@ -637,8 +640,8 @@ class TestSnapshots:
     def check(self, name, text):
         path = SNAP / name
         if not path.exists():
-            path.write_text(text)
-        assert text == path.read_text()
+            path.write_text(text, encoding="utf-8")
+        assert text == path.read_text(encoding="utf-8")
 
     def test_email(self, monkeypatch):
         sections = {"UK": [SNAP_LEAD, SNAP_MAIN, SNAP_BRIEF], "World": [], "US": None}
@@ -659,3 +662,62 @@ class TestSnapshots:
         ledger = {"rail-strike-talks": {"date": "2026-10-09", "state": "talks ongoing"}}
         text = digest.writer_input("UK", [SNAP_LEAD, SNAP_MAIN], SNAP_ITEMS, ledger, oct_day(12), ["bad id 9"])
         self.check("prompt-write.txt", text)
+
+
+class TestPlatform:
+    def test_systemd_timer_matches_schedule(self):
+        service, timer = digest.systemd_units()
+        assert "OnCalendar=Mon,Tue,Wed,Thu,Fri,Sun *-*-* 07:00:00" in timer and "Persistent=true" in timer
+        assert f'ExecStart="{sys.executable}" "{APP / "digest.py"}"' in service
+
+    def test_task_xml_matches_schedule(self):
+        ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+        root = ET.fromstring(digest.task_xml().split("?>", 1)[1])
+        days = [el.tag.split("}")[1] for el in root.find(".//t:DaysOfWeek", ns)]
+        assert days == ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Sunday"]
+        assert root.find(".//t:StartBoundary", ns).text.endswith("T07:00:00")
+        assert root.find(".//t:StartWhenAvailable", ns).text == "true"
+
+    def test_launchd_weekdays_are_sunday_based(self):
+        assert [d["Weekday"] for d in digest.launchd_plist()["StartCalendarInterval"]] == [1, 2, 3, 4, 5, 0]
+
+    def test_second_lock_is_refused(self, tmp_path):
+        with open(tmp_path / "l", "a", encoding="utf-8") as a, open(tmp_path / "l", "a", encoding="utf-8") as b:
+            assert digest.try_lock(a) and not digest.try_lock(b)
+
+    @pytest.mark.skipif(not shutil.which("systemd-analyze"), reason="needs systemd")
+    def test_systemd_accepts_units(self, tmp_path):
+        service, timer = digest.systemd_units()
+        spec = re.search(r"OnCalendar=(.*)", timer).group(1)
+        r = subprocess.run(["systemd-analyze", "calendar", spec], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        (tmp_path / "nd.service").write_text(service, encoding="utf-8")
+        (tmp_path / "nd.timer").write_text(timer.replace("[Timer]", "[Timer]\nUnit=nd.service"), encoding="utf-8")
+        r = subprocess.run(
+            ["systemd-analyze", "verify", str(tmp_path / "nd.service"), str(tmp_path / "nd.timer")],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+
+    @pytest.mark.skipif(sys.platform != "win32" or not os.environ.get("CI"), reason="registers a real task; CI only")
+    def test_task_scheduler_accepts_xml(self, tmp_path):
+        xml, name = tmp_path / "t.xml", "news-digest-ci-test"
+        xml.write_text(digest.task_xml(), encoding="utf-16")
+        r = subprocess.run(["schtasks", "/Create", "/F", "/TN", name, "/XML", str(xml)], capture_output=True, text=True)
+        try:
+            assert r.returncode == 0, r.stdout + r.stderr
+            q = subprocess.run(["schtasks", "/Query", "/TN", name, "/XML"], capture_output=True, text=True)
+            assert "pythonw.exe</Command>" in q.stdout, q.stdout
+        finally:
+            subprocess.run(["schtasks", "/Delete", "/F", "/TN", name], capture_output=True)
+
+    def test_kill_tree_tolerates_exited_process(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        p.wait()
+        digest.kill_tree(p)
+
+    def test_kill_tree_stops_process(self):
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        digest.kill_tree(p)
+        assert p.wait(timeout=10) is not None

@@ -10,6 +10,8 @@ dependencies = [
     "openai>=3.26.1",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.4",
+    "truststore>=0.10.4",
+    "tzdata>=2026.5 ; sys_platform == 'win32'",
 ]
 
 [dependency-groups]
@@ -29,7 +31,9 @@ testpaths = ["tests"]
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "BLE", "UP", "SIM", "RUF"]
+select = ["E", "W", "F", "I", "B", "BLE", "UP", "SIM", "RUF", "PLW1514"]  # PLW1514: explicit encoding (Windows)
+preview = true
+explicit-preview-rules = true
 ignore = [
     "E501",  # ruff format wraps code; long HTML and prompt literals stay whole
     "RUF001", "RUF002", "RUF003",  # en dashes and × in prose are intentional

@@ -92,7 +92,7 @@
 <tr><td style="text-align:left;{{ SERIF }}font-size:16px;line-height:1.55;color:{{ c.ink }};">
 <p style="margin:0;{{ SANS }}font-size:14px;font-weight:700;color:{{ c.muted }};">Morning digest</p>
 <p style="margin:2px 0 8px;font-size:32px;line-height:1.15;font-weight:700;">{{ day }}</p>
-<p style="margin:0;{{ SANS }}font-size:14px;line-height:1.5;color:{{ c.muted }};">News from {{ ampm }} {{ start_day }} to {{ ampm }} {{ end_day }}, {{ tz_label }}.<br>{{ n_stories }} stories, about {{ minutes }} minutes: {% for sec in sections %}<b style="color:{{ sec.color }};">{{ sec.name }}</b> {{ (sec.stories or []) | length }}{% if not loop.last %}, {% endif %}{% endfor %}.{% if skipped %}<br>{{ skipped }} earlier day{{ "s" if skipped != 1 }} skipped (the Mac was off or asleep).{% endif %}</p>
+<p style="margin:0;{{ SANS }}font-size:14px;line-height:1.5;color:{{ c.muted }};">News from {{ ampm }} {{ start_day }} to {{ ampm }} {{ end_day }}, {{ tz_label }}.<br>{{ n_stories }} stories, about {{ minutes }} minutes: {% for sec in sections %}<b style="color:{{ sec.color }};">{{ sec.name }}</b> {{ (sec.stories or []) | length }}{% if not loop.last %}, {% endif %}{% endfor %}.{% if skipped %}<br>{{ skipped }} earlier day{{ "s" if skipped != 1 }} skipped (the computer was off or asleep).{% endif %}</p>
 {% for sec in sections %}{{ section(sec) }}
 {% endfor %}<p style="margin:36px 0 0;padding-top:12px;border-top:1px solid #e3e5e8;{{ SANS }}font-size:12px;line-height:1.6;color:{{ c.muted }};">
 Blue links are trusted outlets. <span style="color:{{ c.plum }};">Plum</span> links and Counterpoint notes come from {{ counterpoint_desc }}.
